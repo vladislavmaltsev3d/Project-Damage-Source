@@ -1,0 +1,22 @@
+{
+  "manifold": {
+    "archive": "manifold-source.tar.gz",
+    "sha256": "9c149991d9a72880ef8267c1860dfe8ca4e642b7b1df564a6f629d34e13a27ba",
+    "files": 304
+  },
+  "oneTBB": {
+    "archive": "oneTBB-source.tar.gz",
+    "sha256": "341650e1b66533e694a0ac2a562c1f380f616138e734c211d56862a328e3481e",
+    "files": 1076
+  },
+  "Clipper2": {
+    "archive": "Clipper2-source.tar.gz",
+    "sha256": "3e4284786fae195c74c8f29101f85338c28afe1e9b85f25a6c43a1d4189b1422",
+    "files": 222
+  },
+  "nanobind": {
+    "archive": "nanobind-source.tar.gz",
+    "sha256": "a7708d7d45e7c1440e2a34823f8d73e774734e8249ff9c0063dfd69fdc18ce98",
+    "files": 241
+  }
+}

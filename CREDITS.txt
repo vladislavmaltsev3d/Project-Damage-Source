@@ -1,0 +1,69 @@
+PROJECT DAMAGE — CREDITS AND ORIGINS
+Source snapshot 2026-11-14
+
+Project development and direction
+Vladislav Maltsev / Lazy3D: Project Damage development, integration, UI,
+materials workflow, new generators and effect requirements. Existing copyright
+notices in individual files remain authoritative; this list does not transfer
+ownership of upstream code.
+
+Geometry foundation
+Cornelius Dammrich — Edgy geometry core, GPL-3.0-or-later.
+https://github.com/corneliusdammrich/edgy-core
+Project Damage is a modified derivative. Original notices and the full GPL
+are retained. C4D-specific alternate licensing notices in upstream source do
+not replace the GPL grant used for this distribution.
+
+Ivy growth — conceptual references
+Thomas Luft, Ivy Generator (2007): classic growth, adhesion and gravity model.
+CrazyIvy: inspiration for growth/collision and orientation improvements.
+The current source describes an independent implementation. These entries
+credit ideas and do not claim a verified GitHub source-code import or license
+for CrazyIvy. No repository URL was supplied for these conceptual references.
+
+Rough break faces / noisy Boolean interfaces — conceptual reference
+FxForge, Destruction Tools: shared noisy-grid cutter idea. Project Damage's
+implementation is independent, according to the project author (2026-11-04);
+Destruction Tools source is not bundled. Credit is for the idea, not copied code.
+
+Native dependencies
+Manifold — The Manifold Authors; Apache-2.0.
+https://github.com/elalish/manifold
+oneTBB — Intel Corporation and contributors; Apache-2.0.
+https://github.com/uxlfoundation/oneTBB
+Clipper2 — Angus Johnson; Boost Software License 1.0.
+https://github.com/AngusJohnson/Clipper2
+nanobind — Wenzel Jakob and contributors; BSD-3-Clause.
+https://github.com/wjakob/nanobind
+robin-map — Thibaut Goetghebuer-Planchon and contributors; MIT.
+https://github.com/Tessil/robin-map
+MT19937 — Makoto Matsumoto and Takuji Nishimura; retained BSD-style notice.
+See licenses/ and THIRD_PARTY_NOTICES.txt for complete notices.
+This list is based on bundled source/build declarations and local dependency
+licenses, not a forensic audit of every statically linked binary component.
+
+Host dependencies
+Blender / Blender Foundation and contributors: host application and Python API.
+NumPy and Python: host-provided numerical and scripting facilities; not
+redistributed as standalone packages by this addon.
+
+Materials and textures
+ambientCG — CC0 1.0 Universal material assets and material preview renders.
+https://ambientcg.com/
+https://docs.ambientcg.com/license/
+The project author confirmed that the supplied material content is from
+ambientCG and is distributed as CC0. This is an author provenance declaration;
+individual packed images in .blend files have not been traced to asset IDs.
+Project-specific material packaging is distributed under CC0 as authorized by
+the project author. This does not change licenses of software dependencies.
+
+Source snapshot
+All author notices in the source files are retained. Source files are the
+installed 2026-11-14 snapshot; portable build scripts are provided separately.
+
+Bricks Generator reference
+Trowel Core geometry-node setup, supplied by the project author.
+The supplied Python file identifies author 23e and contains a copyright notice
+for l3d. Its node graphs were studied for row spacing, bond alternation, end
+pieces, trim and mortar behavior. Project Damage uses an independent C++
+implementation; the supplied node groups and brick assets are not bundled.
