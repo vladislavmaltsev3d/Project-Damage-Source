@@ -1,4 +1,4 @@
-# oсновной файл запуска
+# подключаем части аддона и аккуратно убираем их при выключении
 # Project_Damage Blender Addon
 # Copyright (C) 2026 Vladislav Maltsev - Lazy3D
 #
@@ -18,16 +18,16 @@
 bl_info = {
     "name": "Project Damage | Procedural Destruction Toolkit",
     "author": "Lazy3D",
-    "version": (1, 0, 0),
+    "version": (0, 15, 49),
     "blender": (4, 2, 0),
-    "location": "3D View > Sidebar > Project Damage",
+    "location": "3D View > Sidebar > project_damage",
     "description": "Complete Damage and Destruction Effect Toolkit",
     "category": "Object",
 }
 
                                                                               
-CORE_VERSION = '1.0.0'
-UI_REVISION = 1
+CORE_VERSION = '0.15.49'
+UI_REVISION = 10
 
 from . import ownership, new_effects, breaker, build, clean_floating, core_loader, extra_effects, gizmo, input_prep, live, manual, paint, panels, presets, props
                                                                         
