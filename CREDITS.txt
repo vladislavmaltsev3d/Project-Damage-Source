@@ -10,10 +10,8 @@ ownership of upstream code.
 Geometry foundation
 Cornelius Dammrich — Edgy geometry core, GPL-3.0-or-later.
 https://github.com/corneliusdammrich/edgy-core
-Project Damage is a modified derivative. Original notices and the full GPL
-are retained. C4D-specific alternate licensing notices in upstream source do
-not replace the GPL grant used for this distribution.
-
+Project Damage is a heavily modified and reworked derivative. Original notices and the full GPL
+are retained.
 Ivy growth — conceptual references
 Thomas Luft, Ivy Generator (2007): classic growth, adhesion and gravity model.
 CrazyIvy: inspiration for growth/collision and orientation improvements.
@@ -60,10 +58,3 @@ the project author. This does not change licenses of software dependencies.
 Source snapshot
 All author notices in the source files are retained. Source files are the
 installed 2026-11-14 snapshot; portable build scripts are provided separately.
-
-Bricks Generator reference
-Trowel Core geometry-node setup, supplied by the project author.
-The supplied Python file identifies author 23e and contains a copyright notice
-for l3d. Its node graphs were studied for row spacing, bond alternation, end
-pieces, trim and mortar behavior. Project Damage uses an independent C++
-implementation; the supplied node groups and brick assets are not bundled.
