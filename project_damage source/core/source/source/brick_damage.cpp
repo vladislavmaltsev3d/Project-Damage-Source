@@ -69,7 +69,7 @@
 #include <set>
 #include "surface_chart.h"
 #include "damage_volume.h"
-#include "project_damage_bvh.h"
+#include "through_wall_exit.h"
 #include "project_damage_host.h"
 #include "project_damage_noise.h"
 #include <algorithm>
@@ -1171,7 +1171,9 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 	const size_t N = size_t(g.nu + 1) * size_t(g.nv + 1);
 	g.h.assign(N, 0.0); g.d.assign(N, 0.0); g.s.assign(N, -1.0); g.thick.assign(N, -1.0);
 	g.valid.assign(N, 0); g.holeF.assign(N, 0); g.owned.assign(N, 1);
-	std::vector<char> forbid(N, 0);
+    std::vector<char> forbid(N, 0);
+    std::vector<double> holeExit;
+    if (P.hole && p.holeEnable) holeExit.assign(N, -1.0);
 	const auto chart = p.organic ? s.chart.Select(P.o,P.n,extent*1.5,s.polyN) : std::vector<char>();
 	std::vector<double> arcs(N, 0.0);
 
@@ -1191,7 +1193,11 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 				const V S = P.o + P.t * u + P.b * v + P.n * g.h[k];
 				double th = 0.0;
 				int32_t tp = -1;
-				if (s.Ray(S - P.n * (1e-5 * s.diag), -P.n, 2.0 * s.diag, th, tp)) g.thick[k] = th;
+				if (s.Ray(S - P.n * (1e-5 * s.diag), -P.n, 2.0 * s.diag, th, tp)) {
+                    g.thick[k] = th;
+                    if (!holeExit.empty() && IsOpposingWallExit(*s.v, tp, th, P.n))
+                        holeExit[k] = th + 1e-5 * s.diag;
+                }
 			}
 		}
 	                                                                           
@@ -1224,8 +1230,9 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 				}
 				g.h[k] = hPlane;
 				g.valid[k] = (best >= 0 && hitValid[g.I(best, j)] && over[k] <= lim) ? 1 : 0;
-				g.thick[k] = -1.0;
-				forbid[k] = 0;
+                g.thick[k] = -1.0;
+                if (!holeExit.empty()) holeExit[k] = -1.0;
+                forbid[k] = 0;
 			}
 	}
 	                                                                    
@@ -1479,7 +1486,7 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 						if (!inY && !gone) gone |= state(w, y < 0.0 ? kc - 1 : kc + 1, Locate(L, w, y < 0.0 ? kc - 1 : kc + 1, U)).removed;
 					}
 					if (gone && w < cx.layers) continue;
-					if (w == cx.layers && P.hole && p.holeEnable) {
+					if (w == cx.layers && P.hole && p.holeEnable && holeExit[k] > 0.0) {
 						const Brick& hb = b;
 						if (g.SAt(hb.cu, hb.cv) > thrH + (br(hb.key, 30) - 0.5) * 2.0 * brickAmp) { through = true; break; }
 					}
@@ -1539,6 +1546,11 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 					break;
 				}
 				bd = std::max(bd, -0.5 * P.D);
+			} else if (core > 0.0 && !holeExit.empty() && holeExit[k] > 0.0) {
+				const double U = u + baseU;
+				const int64_t course = Course(L, v + baseV);
+				const Brick back = geom(cx.layers, course, Locate(L, cx.layers, course, U));
+				through = g.SAt(back.cu, back.cv) > thrH + (br(back.key, 30) - 0.5) * 2.0 * brickAmp;
 			}
 			d += core * bd;
             if (P.masonry) d += core * std::max(0.0, g.h[k] - brickH + brickD - P.D);
@@ -1552,7 +1564,7 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 			if (!sharp && sv > 0.0) d = std::max(d, rimLip);
 			if (g.thick[k] > 0.0) d = std::min(d, cap * g.thick[k]);
 			if (through) {
-				d = (g.thick[k] > 0.0 ? g.thick[k] : 3.0 * Dtot + extent) + margin;
+				d = holeExit[k] + std::max(0.01, 1e-6 * s.diag);
 				g.holeF[k] = 1;
 				nodePart = cx.noiseCore ? kBehind : kRender;                                               
 			}
@@ -1825,15 +1837,13 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 		}
 		if (!foot.IsEmpty() && foot.Area() > 4.0 * cell * cell) {
 			std::vector<double> hs;
-			double thickMax = 0.0;
-			for (size_t k = 0; k < N; ++k)
-				if (g.s[k] > 0.0) { hs.push_back(g.h[k]); thickMax = std::max(thickMax, g.thick[k]); }
+            for (size_t k = 0; k < N; ++k)
+                if (g.s[k] > 0.0) hs.push_back(g.h[k]);
 			std::nth_element(hs.begin(), hs.begin() + long(hs.size() / 2), hs.end());
 			const double hp = hs[hs.size() / 2];
 			const double back = P.D + cx.W;                             
 			const double topD = P.D > 0.0 ? P.D - std::min(0.25 * P.D, 0.2) : -margin;
-			double botD = back + cx.coreDepth;
-			if (P.hole && p.holeEnable) botD = std::max(botD, (thickMax > 0.0 ? thickMax : 3.0 * botD) + margin);
+            const double botD = back + cx.coreDepth;
 			const double S = cx.coreScale, A = std::min(cx.coreNoise, 0.2 * S);
 			const double edge = std::max(1.5 * cell, 0.25 * S);
 			const int nDiv = std::max(1, int(std::ceil((botD - topD) / edge)) - 1);
@@ -2481,7 +2491,7 @@ void BuildPatchLowPoly(const Ctx& cx, const Patch& P, Out& out)
 	std::vector<m::CrossSection> holeParts, pockets[3];
 	struct Pull { BB b; };
 	std::vector<Pull> pulls;
-	double holeThick = -1.0;
+    std::vector<double> holeBottom;
 	for (int w = 0; w <= cx.layers; ++w) {
 		std::vector<m::CrossSection> gone;
 		for (int64_t k = k0; k <= k1; ++k) {
@@ -2500,11 +2510,19 @@ void BuildPatchLowPoly(const Ctx& cx, const Patch& P, Out& out)
 				if (w == cx.layers) {
 					                                                              
 					if (P.hole && p.holeEnable && sAt(b.cu, b.cv) > thrH + (br(b.key, 30) - 0.5) * 2.0 * brickAmp) {
-						holeParts.push_back(Rect2(c.a - baseU - eps, c.a + c.len - baseU + eps, vb - eps, vb + L.Pv + eps));
-						const V Q = P.o + P.t * b.cu + P.b * b.cv + P.n * hp;
-						double th = 0.0;
-						int32_t tp = -1;
-						if (s.Ray(Q - P.n * (1e-4 * s.diag), -P.n, 2.0 * s.diag, th, tp)) holeThick = std::max(holeThick, th);
+                        const V start = P.o + P.t * b.cu + P.b * b.cv + P.n * Hs;
+                        double front = 0.0;
+                        int32_t face = -1;
+                        if (s.Ray(start, -P.n, Hs + drop, front, face) &&
+                            m::la::dot(s.polyN[size_t(face)], P.n) > 0.3 && !s.Avoided(face)) {
+                            const double th = FindWallExit(s.bvh, *s.v, start - P.n * front, P.n,
+                                                           1e-5 * s.diag, 2.0 * s.diag);
+                            if (th > 0.0) {
+                                holeParts.push_back(Rect2(c.a - baseU - eps, c.a + c.len - baseU + eps,
+                                                          vb - eps, vb + L.Pv + eps));
+                                holeBottom.push_back(Hs - front - th - std::max(0.01, 1e-6 * s.diag));
+                            }
+                        }
 					}
 				} else {
 					gn = removedAt(w, k, Uc);
@@ -2582,7 +2600,9 @@ void BuildPatchLowPoly(const Ctx& cx, const Patch& P, Out& out)
 		m::CrossSection vis = w + 1 < cx.layers ? R[size_t(w)] - R[size_t(w + 1)] : R[size_t(w)] - H;
 		push(Sweep(P, joints(w + 1, vis), depthTo(P.D + (w + 1) * L.leaf + 0.6 * cx.mDepth), top), 2);
 	}
-	if (!H.IsEmpty() && holeThick > 0.0) push(Sweep(P, H, hp - holeThick - 0.5 * margin, top), 3);
+    if (!H.IsEmpty())
+        for (size_t i = 0; i < holeParts.size(); ++i)
+            push(Sweep(P, holeParts[i] ^ H, holeBottom[i], top), 3);
 	if (!parts.empty()) {
         if(!cx.split) out.cutter = m::Manifold::BatchBoolean(parts,m::OpType::Add);
         else {
@@ -3052,12 +3072,20 @@ void BuildSurfaceBrickLayer(const Surf& surf,const BrickDamageParams& settings,
             if(!insideCuts(pos-normal*std::min(.1,width*.05)))continue;
             bool related=false;
             double removal=3;
+            bool checkedExit = false, hasExit = false;
             for(size_t k=0;k<patches.size();++k){const auto& patch=patches[k];if(m::la::dot(normal,patch.n)<.35)continue;
                 V rel=surface-patch.o;if(std::abs(m::la::dot(rel,patch.n))>std::max(settings.paintSnap*2.,patch.R))continue;
                 double raw=RawField(patch,m::la::dot(rel,patch.t),m::la::dot(rel,patch.b));
                 if(raw>-settings.brickLength*bs)related=true;
                 double threshold=1.-ClampD(settings.breakSize,0.,1.);
-                if(patch.hole&&settings.holeEnable)threshold=std::min(threshold,1.-settings.holeSize);
+                if (patch.hole && settings.holeEnable) {
+                    if (!checkedExit) {
+                        hasExit = FindWallExit(surf.bvh, mesh, surface, normal,
+                                               1e-5 * surf.diag, 2.0 * surf.diag) > 0.0;
+                        checkedExit = true;
+                    }
+                    if (hasExit) threshold = std::min(threshold, 1.0 - settings.holeSize);
+                }
                 if(raw>0 && settings.breakSize>0)removal=std::min(removal,1.+threshold-raw/peaks[k]);
             }if(related){reveal[at]=0;any=true;}damage[at]=ClampD(removal,0.,3.);
         }

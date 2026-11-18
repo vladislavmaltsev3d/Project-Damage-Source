@@ -49,7 +49,7 @@
 #include "manifold/manifold.h"
 #include "manifold/cross_section.h"
 #include "concrete_hit.h"
-#include "project_damage_bvh.h"
+#include "through_wall_exit.h"
 #include "project_damage_host.h"
 #include "project_damage_noise.h"
 #include <algorithm>
@@ -526,7 +526,9 @@ void BuildCrater(const Ctx& cx, const Hit& H, Out& out)
 	cell = std::max(cu, cv);
 	auto I = [&](int i, int j) { return size_t(i) * size_t(nv + 1) + size_t(j); };
 	const size_t N = size_t(nu + 1) * size_t(nv + 1);
-	std::vector<double> h(N, 0.0), thick(N, -1.0), d(N, 0.0);
+    std::vector<double> h(N, 0.0), thick(N, -1.0), d(N, 0.0);
+    std::vector<double> holeExit;
+    if (p.holeEnable) holeExit.assign(N, -1.0);
 	std::vector<char> valid(N, 0), forbid(N, 0), outside(N, 0);
 	for (int i = 0; i <= nu; ++i)
 		for (int j = 0; j <= nv; ++j) {
@@ -538,7 +540,11 @@ void BuildCrater(const Ctx& cx, const Hit& H, Out& out)
 			forbid[k] = s.Avoided(poly) ? 1 : 0;
 			double th = 0.0;
 			int32_t tp = -1;
-			if (s.Ray(World(H, u, v, h[k]) - H.n * (1e-5 * s.diag), -H.n, 2.0 * s.diag, th, tp)) thick[k] = th;
+			if (s.Ray(World(H, u, v, h[k]) - H.n * (1e-5 * s.diag), -H.n, 2.0 * s.diag, th, tp)) {
+                    thick[k] = th;
+                    if (!holeExit.empty() && IsOpposingWallExit(*s.v, tp, th, H.n))
+                        holeExit[k] = th + 1e-5 * s.diag;
+                }
 		}
 	                                                    
 	{
@@ -601,9 +607,9 @@ void BuildCrater(const Ctx& cx, const Hit& H, Out& out)
 				dd = std::max(dd, 0.8 * H.T);
 			}
 			if (thick[k] > 0.0) dd = std::min(dd, std::max(H.T * 1.02, cap * thick[k]));
-			if (p.holeEnable && holeR > 0.0 && re < holeR) {
-				const double f = Smooth(holeR, 0.75 * holeR, re);
-				const double through = (thick[k] > 0.0 ? thick[k] : 3.0 * H.Dc + extent) + margin;
+			if (p.holeEnable && holeR > 0.0 && re < holeR && holeExit[k] > 0.0) {
+				const double f = 1.0 - Smooth(0.75 * holeR, holeR, re);
+				const double through = holeExit[k] + std::max(0.01, 1e-6 * s.diag);
 				dd = Lerp(dd, through, f);
 			}
 			d[k] = dd;
@@ -1215,12 +1221,10 @@ void BuildThrough(const Ctx& cx, const Hit& H, Out& out)
 	if (gapsCS.Area() <= 1e-12) return;
 
 	                                                     
-	double wall = 0.0;
-	int32_t poly = -1;
-	const bool hasBack = s.Ray(H.o - H.n * (1e-4 * H.R), -H.n, 1e9, wall, poly);
-	const bool through = hasBack && wall <= std::max(0.0, p.throughMaxWall);
+    const double wall = FindWallExit(s.bvh, *s.v, H.o, H.n, 1e-4 * H.R, 2.0 * s.diag);
+    const bool through = wall > 0.0 && wall <= std::max(0.0, p.throughMaxWall);
 	const double top = H.Hs;                                                    
-	const double depth = through ? wall + std::max(0.5, 0.25 * wall)
+	const double depth = through ? wall + std::max(0.01, 1e-6 * s.diag)
 		: std::max(0.05 * H.R, ClampD(p.chunkDepth, 0.01, 4.0) * H.R);
 
 	                                                 

@@ -2437,14 +2437,24 @@ static void PlaceBreakFaceCraters(const MeshView& midView, const std::vector<EVe
 // rim gets no break-rim chips (the chips would cut the steep edge back in).
 // Filled by ResolveBreakSolids, read by RunSecondaryPass, same thread.
 static thread_local std::unordered_set<Int32> gSmoothBreakIds;
+constexpr Int32 kBooleanEffectOffset = 2000000;
+constexpr Int32 kBooleanRimOffset = 3000000;
+
+struct BooleanCutters {
+    std::vector<m::Manifold> cuts;
+    std::vector<m::Manifold> fillCuts;
+};
 // Wall Hole frames (rim bricks, rubble) of the current build, handed to the
 // result with the rebar output (same thread).
 static thread_local WallHoleOut gWallHoleOut;
 
 m::Manifold RunSecondaryPass(m::Manifold result, Int32 baseId,
 	std::unordered_map<Int32, Int32>& idToClass, const ProjectDamageParams& params,
-	const ProjectDamageHost& host, Bool breakPhase, std::unordered_map<Int32, Int32>& effectOwners)
+	const ProjectDamageHost& host, Bool breakPhase, std::unordered_map<Int32, Int32>& effectOwners,
+    const ProjectDamageParams* booleanLayer = nullptr)
 {
+    const auto& settings = booleanLayer ? *booleanLayer : params;
+    const Int32 owner = booleanLayer ? kBooleanEffectOffset + booleanLayer->wallInstance : 0;
 	const Bool hasBreak = !params.breakers.empty();
 	const SecondarySpec spec[kSecondaryClasses] = {
 		{ breakPhase ? 0 : params.secAmount, params.sizeMin, params.sizeMax,
@@ -2456,11 +2466,11 @@ m::Manifold RunSecondaryPass(m::Manifold result, Int32 baseId,
 		{ breakPhase || params.surfPaintOnly ? 0 : params.surfSecAmount, params.surfSizeMin, params.surfSizeMax,
 		  params.surfDepthMin, params.surfDepthMax,
 		  params.surfSecSize, params.surfSecDepth, params.seed + 6001, params.chipRimSoft },
-		{ breakPhase && hasBreak ? params.breakRimAmount : 0, params.sizeMin, params.sizeMax,
+		{ breakPhase && hasBreak ? settings.breakRimAmount : 0, params.sizeMin, params.sizeMax,
 		  params.depthMin, params.depthMax,
-		  params.breakRimSize, params.breakRimDepth, params.seed + 9000, params.chipRimSoft },
+		  settings.breakRimSize, settings.breakRimDepth, params.seed + 9000, params.chipRimSoft },
 	};
-	const Bool wantBreakCraters = breakPhase && hasBreak && params.breakSurfDmg
+	const Bool wantBreakCraters = breakPhase && hasBreak && settings.breakSurfDmg
 		&& params.surfAmount > 0;
 	if (spec[0].amount <= 0 && spec[1].amount <= 0 && spec[2].amount <= 0
 		&& spec[3].amount <= 0 && !wantBreakCraters)
@@ -2484,7 +2494,11 @@ m::Manifold RunSecondaryPass(m::Manifold result, Int32 baseId,
 				const Int32 t0 = (Int32)(mid.runIndex[r] / 3);
 				const Int32 t1 = (Int32)(mid.runIndex[r + 1] / 3);
 				auto itc = idToClass.find((Int32)mid.runOriginalID[r]);
-				const Int32 cls = itc != idToClass.end() ? itc->second : NOTOK;
+                Int32 cls = itc != idToClass.end() ? itc->second : NOTOK;
+                if (owner && cls == (Int32)DamageClass::Break) {
+                    const auto match = effectOwners.find((Int32)mid.runOriginalID[r]);
+                    if (match == effectOwners.end() || match->second != owner) cls = NOTOK;
+                }
 				const bool smooth = gSmoothBreakIds.count((Int32)mid.runOriginalID[r]) != 0;
 				for (Int32 t = t0; t < t1 && t < midTris; t++)
 				{
@@ -2601,6 +2615,7 @@ m::Manifold RunSecondaryPass(m::Manifold result, Int32 baseId,
         }
 	}
 
+	const size_t rimCutters = secCutters.size();
 	if (wantBreakCraters)
 		PlaceBreakFaceCraters(midView, mnormals, midExposed, breakFace, params, idToClass, secCutters);
 
@@ -2611,7 +2626,8 @@ m::Manifold RunSecondaryPass(m::Manifold result, Int32 baseId,
 	{
 		std::vector<const BreakerSpec*> texB;
 		for (const BreakerSpec& b : params.breakers)
-			if (b.surfMode == 1 && b.texStrength > 0.0 && b.strength > 0.0) texB.push_back(&b);
+			if ((!booleanLayer || b.booleanOwner == booleanLayer->wallInstance)
+			    && b.surfMode == 1 && b.texStrength > 0.0 && b.strength > 0.0) texB.push_back(&b);
 		if (!texB.empty())
 		{
 			HostStatus(host, "texturing " + std::to_string(secCutters.size()) + " break chips", 72);
@@ -2649,8 +2665,18 @@ m::Manifold RunSecondaryPass(m::Manifold result, Int32 baseId,
 	{
 		secCutters[(size_t)i].NumTri();
 	});
-	for (const m::Manifold& cu : secCutters)
-		result = result - cu;
+    for (size_t i = 0; i < secCutters.size(); ++i) {
+        auto& cutter = secCutters[i];
+        if (owner && !cutter.IsEmpty()) {
+            const bool rimChip = i < rimCutters;
+            const auto cls = idToClass.find((Int32)cutter.OriginalID());
+            cutter = cutter.AsOriginal();
+            const Int32 id = (Int32)cutter.OriginalID();
+            if (cls != idToClass.end()) idToClass[id] = cls->second;
+            effectOwners[id] = rimChip ? kBooleanRimOffset + booleanLayer->wallInstance : owner;
+        }
+        result = result - cutter;
+    }
 
 	return result;
 }
@@ -3687,7 +3713,7 @@ static bool CachedBaseStage(ProjectDamageDamageCache* cache,const ProjectDamageP
 static void PlaceDamage(const CoreInput& in, const ProjectDamageParams& params, const ProjectDamageHost& host,
 	std::vector<m::Manifold>& cutters, std::vector<Int32>& cutterClass,
 	std::vector<Int32>& cutterId, std::vector<m::Manifold>& buildup,
-	std::vector<Int32>& buildId, std::vector<m::Manifold>& beads, std::vector<m::Manifold>& cornerPiles, const HeatField& heat, const RustField& rust, EdgeWearField& wearField, std::vector<ScratchLine>& scratchLines, std::vector<m::Manifold>& lathPlanks, std::vector<m::Manifold>& concreteBars, std::vector<m::Manifold>& separateBricks, std::vector<m::Manifold>& brickMortar, std::vector<m::Box>& brickZones, std::unordered_map<Int32, Int32>& effectOwners, ProjectDamageDamageCache* cache)
+	std::vector<Int32>& buildId, std::vector<m::Manifold>& beads, std::vector<m::Manifold>& cornerPiles, const HeatField& heat, const RustField& rust, EdgeWearField& wearField, std::vector<ScratchLine>& scratchLines, std::vector<m::Manifold>& lathPlanks, std::vector<m::Manifold>& concreteBars, std::vector<Int32>& lathInstances, std::vector<Int32>& barInstances, std::vector<m::Manifold>& separateBricks, std::vector<m::Manifold>& brickMortar, std::vector<m::Box>& brickZones, std::unordered_map<Int32, Int32>& effectOwners, ProjectDamageDamageCache* cache)
 {
     std::vector<Int32> cutEffects, addEffects;
     std::vector<m::Manifold> wpCuts, wpFlaps;
@@ -3711,7 +3737,7 @@ static void PlaceDamage(const CoreInput& in, const ProjectDamageParams& params, 
 
     auto stage = [&](Int32 id, auto compute) {
         const UInt64 key = id < (Int32)params.incrementalKeys.size() ? params.incrementalKeys[id] : 0;
-        if (!cache || !key) { compute(); return; }
+        if (!cache || !key || (!params.wallLayers.empty() && (id == 10 || id == 13))) { compute(); return; }
         if (!cache->incremental) cache->incremental=std::make_shared<IncrementalDamageCache>();
         auto& entries=cache->incremental->stages;
         auto found=entries.find(id);
@@ -3989,12 +4015,28 @@ static void PlaceDamage(const CoreInput& in, const ProjectDamageParams& params, 
 	}
     });
     stamp(9);
+    auto wallPaths = [](const ProjectDamageParams& layer) {
+        std::vector<std::vector<EVec>> paths;
+        const auto& values = layer.wallStrokePoints;
+        size_t offset = 0;
+        for (Int32 count : layer.wallStrokeCounts) {
+            if (count < 2 || size_t(count) > (values.size() - offset) / 3)
+                throw std::invalid_argument("invalid wall layer stroke");
+            std::vector<EVec> path;
+            path.reserve(count);
+            for (Int32 i = 0; i < count; ++i, offset += 3)
+                path.emplace_back(values[offset], values[offset+1], values[offset+2]);
+            paths.push_back(std::move(path));
+        }
+        if (offset != values.size()) throw std::invalid_argument("invalid wall layer stroke length");
+        return paths;
+    };
     stage(10,[&]() {
-	if (params.concrete.enable)
-	{
-		std::vector<m::Manifold> cuts, cracks, bars;
-		PlaceConcreteDamage(in, params.concrete, params.seed, params.mask, in.concreteStrokes, cuts, cracks, bars);
-		const ConcreteDamageParams& cp = params.concrete;
+    auto place = [&](const ProjectDamageParams& layer, const std::vector<std::vector<EVec>>* strokes) {
+        const auto& cp = layer.concrete;
+        if (!cp.enable) return;
+        std::vector<m::Manifold> cuts, cracks, bars;
+        PlaceConcreteDamage(in, cp, layer.seed, params.mask, strokes, cuts, cracks, bars);
 		if (cp.surfMode == 1 && cp.texStrength > 0.0 && !cuts.empty())
 		{
 			// Texture spall surface: the procedural spall (terraces, roughness)
@@ -4013,8 +4055,16 @@ static void PlaceDamage(const CoreInput& in, const ProjectDamageParams& params, 
 		}
 		for (auto& cut : cuts) { cutters.push_back(std::move(cut)); cutterClass.push_back((Int32)DamageClass::Surface); }
 		for (auto& crack : cracks) { cutters.push_back(std::move(crack)); cutterClass.push_back((Int32)DamageClass::Fracture1); }
-		for (auto& bar : bars) concreteBars.push_back(std::move(bar));
-	}
+        for (auto& bar : bars) concreteBars.push_back(std::move(bar));
+        barInstances.resize(concreteBars.size(), layer.wallInstance);
+        cutEffects.resize(cutters.size(), layer.wallInstance ? 10000 + layer.wallInstance : 10);
+    };
+    place(params, in.concreteStrokes);
+    for (const auto& layer : params.wallLayers) {
+        if (!layer.concrete.enable) continue;
+        const auto strokes = wallPaths(layer);
+        place(layer, &strokes);
+    }
     });
     stamp(10);
     stage(11,[&]() {
@@ -4048,11 +4098,12 @@ static void PlaceDamage(const CoreInput& in, const ProjectDamageParams& params, 
     stamp(12);
     stage(13,[&]() {
 
-    if (params.lath.enable) {
+    auto place = [&](const ProjectDamageParams& layer, const std::vector<std::vector<EVec>>* strokes) {
+        const auto& lp = layer.lath;
+        if (!lp.enable) return;
         LathDamageOut ld;
-        PlaceLathDamage(in, params.lath, params.seed, params.mask, in.lathPaint, ld);
+        PlaceLathDamage(in, lp, layer.seed, params.mask, strokes, ld);
         auto& cuts=ld.cutters; auto& cracks=ld.cracks;
-        const LathDamageParams& lp = params.lath;
         textureBack(cuts, lp.surfMode, lp.texPath, lp.texScale, lp.texStrength, lp.texOffX, lp.texOffY, lp.texOffZ, lp.texEdge, "the area behind the laths");
         if (lp.surfMode == 0 && lp.noiseStrength > 0.0 && !cuts.empty()) {
             // Procedural back surface (surface_noise): the Texture displacement with noise for the image
@@ -4067,10 +4118,17 @@ static void PlaceDamage(const CoreInput& in, const ProjectDamageParams& params, 
             });
             for (const std::string& msg : logs) if (!msg.empty()) { HostLog(host, msg); break; }
         }
-        lathPlanks=std::move(ld.planks);
+        for (auto& plank : ld.planks) lathPlanks.push_back(std::move(plank));
+        lathInstances.resize(lathPlanks.size(), layer.wallInstance);
         for (auto& c : cuts) { cutters.push_back(std::move(c)); cutterClass.push_back((Int32)DamageClass::Surface); }
         for (auto& c : cracks) { cutters.push_back(std::move(c)); cutterClass.push_back((Int32)DamageClass::Fracture1); }
-
+        cutEffects.resize(cutters.size(), layer.wallInstance ? 10000 + layer.wallInstance : 13);
+    };
+    place(params, in.lathPaint);
+    for (const auto& layer : params.wallLayers) {
+        if (!layer.lath.enable) continue;
+        const auto strokes = wallPaths(layer);
+        place(layer, &strokes);
     }
     });
     stamp(13);
@@ -4258,9 +4316,99 @@ static void PlaceDamage(const CoreInput& in, const ProjectDamageParams& params, 
     }
 }
 
+using PaintedCut = std::pair<Int32, m::Manifold>;
+
+static m::mat3x4 PaintedHoleTransform(const std::vector<Float>& values)
+{
+    return m::mat3x4(m::vec3(values[0], values[4], values[8]),
+                     m::vec3(values[1], values[5], values[9]),
+                     m::vec3(values[2], values[6], values[10]),
+                     m::vec3(values[3], values[7], values[11]));
+}
+
+static m::Manifold PaintedHolePrism(const m::CrossSection& section, double low, double high)
+{
+    return m::Manifold::Extrude(section.ToPolygons(), high - low).Translate({0.0, 0.0, low});
+}
+
+static bool PaintedHoleDamageClass(Int32 value)
+{
+    const auto cls = static_cast<DamageClass>(value);
+    return cls == DamageClass::Surface || cls == DamageClass::BrickFront ||
+           cls == DamageClass::BrickBehind || cls == DamageClass::BrickBreak ||
+           cls == DamageClass::BrickSeam || cls == DamageClass::BrickRender;
+}
+
+static std::vector<PaintedCut> PlacePaintedThroughHoles(const m::Manifold& body,
+    const std::vector<PaintedThroughHole>& drawings, const std::vector<m::Manifold>& cutters,
+    const std::vector<Int32>& classes, const std::vector<Int32>& ids,
+    const std::unordered_map<Int32, Int32>& owners)
+{
+    std::vector<PaintedCut> cuts;
+    for (const auto& drawing : drawings) {
+        if (drawing.outline.size() < 6 || drawing.outline.size() % 2 ||
+            drawing.toPlane.size() != 12 || drawing.toSource.size() != 12 ||
+            !(drawing.nearMax > drawing.nearMin))
+            continue;
+        const auto toPlane = PaintedHoleTransform(drawing.toPlane);
+        const auto toSource = PaintedHoleTransform(drawing.toSource);
+        m::SimplePolygon contour;
+        for (size_t i = 0; i < drawing.outline.size(); i += 2)
+            contour.emplace_back(drawing.outline[i], drawing.outline[i + 1]);
+        const m::CrossSection outline(contour, m::CrossSection::FillRule::EvenOdd);
+        if (outline.IsEmpty()) continue;
+
+        const auto window = PaintedHolePrism(outline, drawing.nearMin, drawing.nearMax);
+        const auto searchBox = window.Transform(toSource).BoundingBox();
+        std::vector<m::Manifold> damage;
+        for (size_t i = 0; i < cutters.size(); ++i) {
+            const auto owner = owners.find(ids[i]);
+            if (owner != owners.end() && owner->second == drawing.effect &&
+                PaintedHoleDamageClass(classes[i]) &&
+                cutters[i].BoundingBox().DoesOverlap(searchBox))
+                damage.push_back(cutters[i].Transform(toPlane) ^ window);
+        }
+        if (damage.empty()) continue;
+        auto nearbyDamage = m::Manifold::BatchBoolean(damage, m::OpType::Add);
+        if (nearbyDamage.IsEmpty() || nearbyDamage.Status() != m::Manifold::Error::NoError) continue;
+
+        const auto localBody = body.Transform(toPlane);
+        const auto bounds = localBody.BoundingBox();
+        const double margin = 0.01;
+        const auto column = localBody ^ PaintedHolePrism(outline, bounds.min.z - margin, bounds.max.z + margin);
+        if (column.Status() != m::Manifold::Error::NoError) continue;
+        // Each piece of wall under the contour is checked against the existing
+        // damage within reach. An unrelated sheet behind it stays solid.
+        for (const auto& part : column.Decompose()) {
+            if (!part.BoundingBox().DoesOverlap(nearbyDamage.BoundingBox())) continue;
+            const auto affected = part ^ nearbyDamage;
+            if (affected.IsEmpty() || affected.Status() != m::Manifold::Error::NoError) continue;
+            const m::CrossSection footprint(affected.Project(), m::CrossSection::FillRule::NonZero);
+            if (footprint.IsEmpty()) continue;
+            const auto depth = part.BoundingBox();
+            const auto hole = part ^ PaintedHolePrism(footprint, depth.min.z - margin, depth.max.z + margin);
+            if (!hole.IsEmpty() && hole.Status() == m::Manifold::Error::NoError)
+                cuts.emplace_back(drawing.effect, hole.Transform(toSource));
+        }
+    }
+    return cuts;
+}
+
+static bool CutPaintedHoles(m::Manifold& detail, Int32 owner, const std::vector<PaintedCut>& holes)
+{
+    bool changed = false;
+    for (const auto& hole : holes)
+        if (hole.first == owner && detail.BoundingBox().DoesOverlap(hole.second.BoundingBox())) {
+            detail = detail - hole.second;
+            changed = true;
+        }
+    return changed;
+}
+
 static void ResolveBreakSolids(const CoreInput& in, const ProjectDamageParams& params, const ProjectDamageHost& host,
 	ProjectDamageDamageCache* cache, std::unordered_map<Int32, Int32>& idToClass,
-	std::vector<m::Manifold>& breakSolids, std::vector<m::Manifold>& rebarSolids)
+	std::vector<m::Manifold>& breakSolids, std::vector<m::Manifold>& rebarSolids,
+    std::unordered_map<Int32, BooleanCutters>& layers, std::unordered_map<Int32, Int32>& effectOwners)
 {
 	HostStatus(host, "breaking " + std::to_string(params.breakers.size())
 		+ " breakers", 50);
@@ -4339,6 +4487,17 @@ static void ResolveBreakSolids(const CoreInput& in, const ProjectDamageParams& p
 				cut = TextureDisplaceCutter(cut, s, s.strength, &message);
 				if (!message.empty()) HostLog(host,message);
 			}
+            // noise must not put thin bridges back inside the sphere's cut
+            if (s.mode == BREAKER_MODE_SPHERE && cut.NumTri() != 0 &&
+                (s.strength > 0.0 || (s.surfMode == 1 && s.texStrength > 0.0)))
+            {
+                const m::Manifold envelope = BuildBreakCutter(s, 0.0, bbMin, bbMax);
+                if (envelope.NumTri() != 0) {
+                    const m::Manifold expanded = cut + envelope;
+                    if (expanded.Status() == m::Manifold::Error::NoError && expanded.NumTri() != 0)
+                        cut = expanded;
+                }
+            }
 			if (s.smoothSlope && cut.NumTri() != 0)
 			{
 				// Smooth Slope: flare the opening into the surface; the band B
@@ -4361,7 +4520,13 @@ static void ResolveBreakSolids(const CoreInput& in, const ProjectDamageParams& p
 		}
 		idToClass[(Int32)cut.OriginalID()] = (Int32)DamageClass::Break;
 		if (s.smoothSlope) gSmoothBreakIds.insert((Int32)cut.OriginalID());
-		if(s.rebar) rebarSolids.push_back(cut);
+        if (s.booleanOwner > 0) {
+            effectOwners[(Int32)cut.OriginalID()] = kBooleanEffectOffset + s.booleanOwner;
+            auto& layer = layers[s.booleanOwner];
+            layer.cuts.push_back(cut);
+            if (s.rebar) layer.fillCuts.push_back(cut);
+        }
+        if (s.rebar) rebarSolids.push_back(cut);
         breakSolids.push_back(std::move(cut));
 	}
 	if (cache != nullptr)
@@ -4699,6 +4864,7 @@ CoreResult BuildWornCore(const CoreInput& inRaw, const ProjectDamageParams& para
     EdgeWearField wearField;
     std::vector<ScratchLine> scratchLines;
     std::vector<m::Manifold> lathPlanks, concreteBars, separateBricks, brickMortar;
+    std::vector<Int32> lathInstances, barInstances;
     std::vector<m::Box> brickZones;
 
 	out.inputValid = true;
@@ -4715,7 +4881,7 @@ CoreResult BuildWornCore(const CoreInput& inRaw, const ProjectDamageParams& para
 	std::vector<Int32> buildId;
 
 	std::vector<m::Manifold> separateBeads, separatePiles;
-	const Bool cacheLive = params.buildCoverage<=0 && params.buildCornerProb<=0 && cache != nullptr && params.incrementalKeys.empty() && !params.breakers.empty();
+	const Bool cacheLive = params.buildCoverage<=0 && params.buildCornerProb<=0 && cache != nullptr && params.incrementalKeys.empty() && params.wallLayers.empty() && !params.breakers.empty();
 	if (cache != nullptr && !cacheLive)
 		DamageCacheClear(cache);
 	const Bool placed = cacheLive
@@ -4723,7 +4889,7 @@ CoreResult BuildWornCore(const CoreInput& inRaw, const ProjectDamageParams& para
 			buildup, buildId);
 	if (!placed)
 	{
-		PlaceDamage(in, params, host, cutters, cutterClass, cutterId, buildup, buildId, separateBeads, separatePiles, heat, rust, wearField, scratchLines, lathPlanks, concreteBars, separateBricks, brickMortar, brickZones, effectOwners, cache);
+		PlaceDamage(in, params, host, cutters, cutterClass, cutterId, buildup, buildId, separateBeads, separatePiles, heat, rust, wearField, scratchLines, lathPlanks, concreteBars, lathInstances, barInstances, separateBricks, brickMortar, brickZones, effectOwners, cache);
 		if (cacheLive)
 			DamageCacheStore(cache, cacheFingerprint, cutters, cutterClass, cutterId,
 				buildup, buildId);
@@ -4751,6 +4917,25 @@ CoreResult BuildWornCore(const CoreInput& inRaw, const ProjectDamageParams& para
         a.clear(); b.clear();
         if(params.scratch.enable) PlaceScratches(in,params.scratch,params.seed,params.mask,in.scratchStrokes,a,b,&scratchLines);
     }
+    const auto paintedHoles = PlacePaintedThroughHoles(base, params.throughHoles, cutters, cutterClass, cutterId, effectOwners);
+    for (const auto& hole : paintedHoles) {
+        auto cutter = hole.second.AsOriginal();
+        const Int32 id = (Int32)cutter.OriginalID();
+        cutters.push_back(std::move(cutter));
+        cutterClass.push_back((Int32)(hole.first == 18 ? DamageClass::BrickBreak : DamageClass::Surface));
+        cutterId.push_back(id);
+        effectOwners[id] = hole.first;
+    }
+    if (!paintedHoles.empty())
+        for (size_t i = 0; i < buildup.size(); ++i) {
+            const auto owner = effectOwners.find(buildId[i]);
+            if (owner == effectOwners.end() || !CutPaintedHoles(buildup[i], owner->second, paintedHoles)) continue;
+            if (buildup[i].IsEmpty()) continue;
+            const Int32 effect = owner->second;
+            buildup[i] = buildup[i].AsOriginal();
+            buildId[i] = (Int32)buildup[i].OriginalID();
+            effectOwners[buildId[i]] = effect;
+        }
     for (size_t i = 0; i < cutterId.size(); i++)
 		idToClass[cutterId[i]] = cutterClass[i];
 	for (size_t i = 0; i < buildId.size(); i++)
@@ -4766,8 +4951,14 @@ CoreResult BuildWornCore(const CoreInput& inRaw, const ProjectDamageParams& para
     }
 
 	std::vector<m::Manifold> breakSolids, rebarSolids;
+    std::unordered_map<Int32, BooleanCutters> booleanCutters;
 	if (!params.breakers.empty())
-		ResolveBreakSolids(in, params, host, cache, idToClass, breakSolids, rebarSolids);
+		ResolveBreakSolids(in, params, host, cache, idToClass, breakSolids, rebarSolids, booleanCutters, effectOwners);
+    const BooleanCutters emptyBoolean;
+    auto ownedCutters = [&](Int32 serial) -> const BooleanCutters& {
+        const auto it = booleanCutters.find(serial);
+        return it == booleanCutters.end() ? emptyBoolean : it->second;
+    };
     // Auto Setup: reuse the already generated cut volumes, including damage
     // from other assets. This list is used only for reinforcement placement;
     // the damaged mesh and its materials follow the original Boolean path.
@@ -4780,11 +4971,13 @@ CoreResult BuildWornCore(const CoreInput& inRaw, const ProjectDamageParams& para
         HostStatus(host, "collecting separate bricks and mortar", 39);
     for(auto& brick:separateBricks) {
         for(const auto& cut:breakSolids) brick=brick-cut;
+        CutPaintedHoles(brick, 18, paintedHoles);
         if(brick.Status()!=m::Manifold::Error::NoError) throw std::runtime_error("separate brick Boolean failed");
     }
     BrickDamageMesh brickMesh;
     for(auto& mortar:brickMortar) {
         for(const auto& cut:breakSolids) mortar=mortar-cut;
+        CutPaintedHoles(mortar, 18, paintedHoles);
         if(mortar.Status()!=m::Manifold::Error::NoError) throw std::runtime_error("brick mortar Boolean failed");
     }
     BrickDamageBricksMesh(separateBricks,brickMesh,&brickMortar);
@@ -4794,23 +4987,28 @@ CoreResult BuildWornCore(const CoreInput& inRaw, const ProjectDamageParams& para
     for(size_t piece=0;piece<lathPlanks.size();++piece) {
         auto plank=lathPlanks[piece];
         for(const auto& cut:breakSolids) plank=plank-cut;
+        const Int32 instance = piece < lathInstances.size() ? lathInstances[piece] : 0;
+        CutPaintedHoles(plank, instance ? 10000 + instance : 13, paintedHoles);
         if(plank.Status()!=m::Manifold::Error::NoError) throw std::runtime_error("lath plank Boolean failed");
         auto pm=plank.GetMeshGL();const Int32 offset=(Int32)out.lathPoints.size();
         for(size_t v=0;v<pm.NumVert();++v) out.lathPoints.emplace_back(pm.vertProperties[v*pm.numProp],pm.vertProperties[v*pm.numProp+1],pm.vertProperties[v*pm.numProp+2]);
         for(size_t t=0;t<pm.triVerts.size();t+=3) {
             Int32 a=offset+pm.triVerts[t],b=offset+pm.triVerts[t+1],c=offset+pm.triVerts[t+2];
             out.lathPolys.push_back({a,b,c,c});out.lathPiece.push_back((Int32)piece);
+            out.lathInstance.push_back(piece < lathInstances.size() ? lathInstances[piece] : 0);
         }
     }
     // Concrete reinforcement is independent output: retain complete closed bars,
     // including embedded ends, rather than unioning them into the damaged wall.
-    for(const auto& bar:concreteBars) {
+    for(size_t piece=0; piece<concreteBars.size(); ++piece) {
+        const auto& bar = concreteBars[piece];
         auto mg=bar.GetMeshGL();const Int32 off=(Int32)out.concreteRebarPoints.size();
         for(size_t v=0;v<mg.NumVert();++v)
             out.concreteRebarPoints.emplace_back(mg.vertProperties[v*mg.numProp],mg.vertProperties[v*mg.numProp+1],mg.vertProperties[v*mg.numProp+2]);
         for(size_t t=0;t<mg.triVerts.size();t+=3) {
             Int32 a=off+mg.triVerts[t],b=off+mg.triVerts[t+1],c=off+mg.triVerts[t+2];
             out.concreteRebarPolys.push_back({a,b,c,c});
+            out.concreteRebarInstance.push_back(piece < barInstances.size() ? barInstances[piece] : 0);
         }
     }
     // Wood Framing fill: built with the hollowing (below), placed by buildRebar
@@ -4818,7 +5016,50 @@ CoreResult BuildWornCore(const CoreInput& inRaw, const ProjectDamageParams& para
     const bool chips = params.breakRebar.enable && params.breakRebar.material == BREAK_FILL_CHIPS;
     BreakRebarMesh framingMesh;
     bool framingBuilt = false;
+    std::vector<BreakRebarMesh> layerMeshes(params.booleanLayers.size());
+    std::vector<char> builtLayers(params.booleanLayers.size(), false);
+    std::vector<m::Manifold> existingFillSolids;
+    if (std::any_of(params.booleanLayers.begin(), params.booleanLayers.end(),
+                    [](const auto& layer) { return layer.breakRebar.enable && layer.breakRebar.existingDamage; })) {
+        existingFillSolids = breakSolids;
+        existingFillSolids.insert(existingFillSolids.end(), cutters.begin(), cutters.end());
+    }
     auto buildRebar = [&](const m::Manifold& left) {
+      for (size_t i = 0; i < params.booleanLayers.size(); ++i) {
+        const auto& layer = params.booleanLayers[i];
+        auto settings = layer.breakRebar;
+        const auto& owned = ownedCutters(layer.wallInstance);
+        const auto& solids = settings.existingDamage ? existingFillSolids : owned.fillCuts;
+        m::Manifold local;
+        if (!settings.existingDamage && (layer.booleanTubeFill || settings.enable)) {
+            local = base;
+            for (const auto& cut : owned.cuts) local = local - cut;
+        }
+        if (layer.booleanTubeFill && settings.generatedGeometry && (!owned.cuts.empty() || settings.existingDamage)) {
+            const auto mesh = (settings.existingDamage ? left : local).GetMeshGL();
+            auto& body = out.booleanBodies.emplace_back();
+            body.serial = layer.wallInstance;
+            for (size_t j = 0; j < mesh.NumVert(); ++j)
+                body.points.emplace_back(mesh.vertProperties[j * mesh.numProp],
+                    mesh.vertProperties[j * mesh.numProp + 1], mesh.vertProperties[j * mesh.numProp + 2]);
+            for (size_t j = 0; j < mesh.triVerts.size(); j += 3) {
+                const Int32 a = mesh.triVerts[j], b = mesh.triVerts[j + 1], c = mesh.triVerts[j + 2];
+                body.polys.push_back({a, b, c, c});
+            }
+        }
+        if (!settings.enable || !settings.generatedGeometry ||
+            (solids.empty() && settings.strokeCount.empty() && !settings.showAll)) continue;
+        auto& mesh = layerMeshes[i];
+        if (settings.material == BREAK_FILL_FRAMING) {
+          if (!builtLayers[i]) BuildBreakFraming(base, solids, settings, layer.seed, mesh, nullptr);
+        } else if (settings.material == BREAK_FILL_CHIPS) {
+          if (!builtLayers[i]) BuildBreakChips(base, solids, settings, layer.seed, mesh, nullptr);
+        } else {
+          if (settings.material == BREAK_FILL_LATHS) settings.material = BREAK_FILL_PLANKS;
+          BuildBreakRebar(base, solids, settings, layer.seed, mesh, settings.existingDamage ? &left : &local, in.view.guideField);
+        }
+        out.booleanFills.emplace_back(layer.wallInstance, std::move(mesh));
+      }
       if(params.breakRebar.enable && params.breakRebar.generatedGeometry && (!rebarSolids.empty() || !params.breakRebar.strokeCount.empty() || params.breakRebar.showAll)) {
         BreakRebarMesh rb;
         if (framing) {
@@ -4909,9 +5150,14 @@ CoreResult BuildWornCore(const CoreInput& inRaw, const ProjectDamageParams& para
 	for (const m::Manifold& cu : breakSolids)
 		result = result - cu;
 
-	if (!breakSolids.empty())
-		result = RunSecondaryPass(std::move(result), baseId, idToClass, params,
-			host, true, effectOwners);
+    if (!breakSolids.empty()) {
+        if (params.booleanLayers.empty())
+            result = RunSecondaryPass(std::move(result), baseId, idToClass, params, host, true, effectOwners);
+        else
+            for (const auto& layer : params.booleanLayers)
+                if (!ownedCutters(layer.wallInstance).cuts.empty())
+                    result = RunSecondaryPass(std::move(result), baseId, idToClass, params, host, true, effectOwners, &layer);
+    }
 
 	const bool fractCut = std::find(cutterClass.begin(), cutterClass.end(), (Int32)DamageClass::Fracture1) != cutterClass.end()
         || std::find(cutterClass.begin(), cutterClass.end(), (Int32)DamageClass::Fracture2) != cutterClass.end()
@@ -5087,6 +5333,28 @@ CoreResult BuildWornCore(const CoreInput& inRaw, const ProjectDamageParams& para
                     HostLog(host, "[ProjectDamage] chips: " + std::to_string(dropped) + " loose pieces removed");
                 result = std::move(torn);
             }
+        }
+    }
+    if (!rebarSolids.empty()) {
+        for (size_t i = 0; i < params.booleanLayers.size(); ++i) {
+            const auto& layer = params.booleanLayers[i];
+            const auto& settings = layer.breakRebar;
+            const auto& cuts = ownedCutters(layer.wallInstance).fillCuts;
+            if (!settings.enable || settings.existingDamage || cuts.empty()) continue;
+            m::Manifold carve;
+            if (settings.material == BREAK_FILL_FRAMING)
+                BuildBreakFraming(base, cuts, settings, layer.seed, layerMeshes[i], &carve);
+            else if (settings.material == BREAK_FILL_CHIPS)
+                BuildBreakChips(base, cuts, settings, layer.seed, layerMeshes[i], &carve);
+            else continue;
+            builtLayers[i] = true;
+            if (carve.IsEmpty()) continue;
+            carve = carve.AsOriginal();
+            idToClass[carve.OriginalID()] = (Int32)DamageClass::Break;
+            auto hollow = result - carve;
+            if (hollow.Status() != m::Manifold::Error::NoError) continue;
+            DropFallenFragments(hollow, base, 0.0005);
+            result = std::move(hollow);
         }
     }
     buildRebar(result);

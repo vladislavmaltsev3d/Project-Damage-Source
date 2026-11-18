@@ -69,7 +69,8 @@
 #include "lath_damage.h"
 #include "surface_chart.h"
 #include "damage_volume.h"
-#include "project_damage_bvh.h"
+#include "through_wall_exit.h"
+#include "framing_nail_anchor.h"
 #include "project_damage_host.h"
 #include "project_damage_noise.h"
 #include <algorithm>
@@ -725,6 +726,8 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 	g.h.assign(N, 0.0); g.d.assign(N, 0.0); g.s.assign(N, -1.0); g.sb.assign(N, -1.0); g.thick.assign(N, -1.0); g.arc.assign(N, 0.0);
 	g.valid.assign(N, 0); g.holeF.assign(N, 0); g.owned.assign(N, 1);
 	std::vector<char> forbid(N, 0);
+	std::vector<double> holeExit;
+    if (P.hole && p.holeEnable) holeExit.assign(N, -1.0);
 	const auto chart = p.organic ? s.chart.Select(P.o,P.n,extent*1.5,s.polyN) : std::vector<char>();
 
 	const double Hs = 0.3 * extent + Dtot + 1e-3;
@@ -743,7 +746,11 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 				const V S = P.o + P.t * u + P.b * v + P.n * g.h[k];
 				double th = 0.0;
 				int32_t tp = -1;
-				if (s.Ray(S - P.n * (1e-5 * s.diag), -P.n, 2.0 * s.diag, th, tp)) g.thick[k] = th;
+				if (s.Ray(S - P.n * (1e-5 * s.diag), -P.n, 2.0 * s.diag, th, tp)) {
+					g.thick[k] = th;
+					if (!holeExit.empty() && IsOpposingWallExit(*s.v, tp, th, P.n))
+                        holeExit[k] = th + 1e-5 * s.diag;
+				}
 			}
 		}
 	                                                                    
@@ -938,18 +945,21 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 				if (open[k]) fh[k] = sh[k];
 				else if (!outer[k] && g.s[k] > 0.0) fh[k] = cell;
 				else fh[k] = std::min(sh[k] > -1e299 ? sh[k] : -cell, -1e-6);
-				if (fh[k] > 0.0) {
-					holeW[k] = 1.0;
-					g.holeF[k] = 1;
-				}
-				if (fh[k] > -2.0 * cell) {                                                     
+				// Only real, opposing wall faces may set a through-cut depth.
+				// The extrapolated height field also reaches beyond the wall at edges.
+				if (fh[k] > -2.0 * cell && holeExit[k] > 0.0) {
 					zTop = std::max(zTop, g.h[k]);
-					zBot = std::min(zBot, g.h[k] - (g.thick[k] > 0.0 ? g.thick[k] : 3.0 * Dtot + extent));
+					zBot = std::min(zBot, g.h[k] - holeExit[k]);
 				}
 			}
-			holePoly = HoleOutline(fh, g.nu, g.nv, u0, v0, g.cu, g.cv);
-			holeTop = zTop + margin;
-			holeBot = zBot - margin;
+			if (zTop > zBot) {
+				holePoly = HoleOutline(fh, g.nu, g.nv, u0, v0, g.cu, g.cv);
+				holeTop = zTop + margin;
+				holeBot = zBot - std::max(0.01, 1e-6 * s.diag);
+				if (holePoly.size() >= 3)
+					for (size_t k = 0; k < N; ++k)
+						if (fh[k] > 0.0) { holeW[k] = 1.0; g.holeF[k] = 1; }
+			}
 		}
 		for (size_t k = 0; k < N; ++k)
 			if (!outside[k] && g.d[k] <= 1e-6) { outside[k] = 1; g.d[k] = 0.0; }
@@ -1992,6 +2002,8 @@ void BuildRiven(const Ctx& cx, const Patch& P, const Patch& Q, const Grid& g,
                                                                               
 struct FrameSmp { V base; double h, thk; bool ok, exp, anchor, hole, own; };
 
+struct StudNailSupport { size_t solid; double from, to; };
+
                                                                                       
 void RectRing(const V& c, const V& side, const V& up, double hw, double ht,
 	std::array<V, kRing>& ring, std::array<double, kRing>& acr)
@@ -2011,6 +2023,11 @@ void BuildFraming(const Ctx& cx, const Patch& P, const Patch& Q, const Grid& g,
 	const LathDamageParams& p = *cx.p;
 	const double sw = cx.studW, sdp = cx.studD, sp = cx.studSp;
 	if (!(sw > 0.0) || !(sdp > 0.0)) return;
+	const double na = ClampD(p.nailAmount, 0.0, 1.0);
+	// Use the usual plaster depth as a fixed reference for existing damage presets.
+	const double nLen = std::max(0.0, p.nailLength) * (g.structural ? 1.0 : 1.4);
+	const bool hasNails = na > 0.0 && nLen > 0.0;
+	std::unordered_map<uint64_t, std::vector<StudNailSupport>> nailSupports;
 	const double splinter = ClampD(p.lathSplinter, 0.0, 6.0);
 	const double bend = ClampD(p.lathBend, 0.0, 6.0);
 	const double optTol = ClampD(p.lathOptimize, 0.0, 1.0) * 0.03 * std::min(sw, sdp);
@@ -2117,7 +2134,11 @@ void BuildFraming(const Ctx& cx, const Patch& P, const Patch& Q, const Grid& g,
 				for (int x = bodyA; x <= bodyB; ++x) { c.push_back(ctrAt(x)); hw.push_back(half); ht.push_back(0.5 * dep); }
 				const size_t firstSolid = out.laths.size();
 				m::Manifold body = Strip(c, P.n, hw, ht, optTol);
-				if (!body.IsEmpty()) out.laths.push_back(std::move(body));
+				if (!body.IsEmpty()) {
+					if (hasNails && !alongU)
+						nailSupports[key].push_back({firstSolid, a0 + bodyA * step, a0 + bodyB * step});
+					out.laths.push_back(std::move(body));
+				}
 				for (int end = 0; end < 2 && splinter > 0.0; ++end) {
 					if (!(end == 0 ? freeA : freeB)) continue;
 					const int at = end == 0 ? bodyA : bodyB;
@@ -2178,14 +2199,14 @@ void BuildFraming(const Ctx& cx, const Patch& P, const Patch& Q, const Grid& g,
 	}
 	                                                                
 	out.nailStart=out.laths.size();
-	const double na = ClampD(p.nailAmount, 0.0, 1.0);
-	const double nLen = std::max(0.0, p.nailLength) * P.D;
-	if (na > 0.0 && nLen > 0.0) {
+	if (hasNails) {
 		const double pitch = 20.0 * std::max(0.1, sw / 3.8);
 		const double rad = g.structural ? std::min(0.07*sw,0.18225*std::max(.1,g.nailSize)) : 0.07*sw;
 		for (int64_t k = s0; k <= s1; ++k) {
 			const double uc = studU(k);
 			if (uc < u0 || uc > u1) continue;
+			const auto support = nailSupports.find(uint64_t(k) ^ 0x53545544ULL);
+			if (support == nailSupports.end()) continue;
 			const int64_t r0 = int64_t(std::floor((baseV + v0) / pitch)), r1 = int64_t(std::ceil((baseV + v1) / pitch));
 			for (int64_t r = r0; r <= r1; ++r) {
 				const double vc = double(r) * pitch - baseV;
@@ -2196,12 +2217,21 @@ void BuildFraming(const Ctx& cx, const Patch& P, const Patch& Q, const Grid& g,
 				const double nailV=vc+(g.structural?(Random01(cx.seed,nk,5)-0.5)*0.08*sw:0.);
 				double hh, dd, thk; bool hl, own;
 				if (!g.Sample(Q, nailU, nailV, hh, dd, thk, hl, own) || hl || !own || dd < P.D + 0.3 * sdp) continue;
-				const double embedNail = g.structural ? std::min(0.35*sdp,10.*rad) : 15.*rad;
-				const double len = g.structural ? embedNail+nLen*Lerp(1.0,1.15,Random01(cx.seed,nk,1)) : nLen * Lerp(0.6, 1.2, Random01(cx.seed, nk, 1)) + 1.5 * rad * 10.0;
+				const auto& segments = support->second;
+				const auto segment = std::find_if(segments.begin(), segments.end(), [=](const auto& member) {
+					return nailV >= member.from && nailV <= member.to;
+				});
+				if (segment == segments.end()) continue;
+				const V nominal = P.o + P.t * nailU + P.b * nailV + P.n * (hh - P.D);
+				const auto seat = FindFramingNailSupport(out.laths[segment->solid], nominal, P.n, 2.0*sdp + bend*sw + 1.0);
+				if (!seat) continue;
+				const double embedNail = g.structural ? std::min(.35*seat->depth, 10.*rad) : std::min(.75*seat->depth, 15.*rad);
+				const double lengthVariation = Random01(cx.seed, nk, 1);
+				const double len = embedNail + nLen * (g.structural ? Lerp(1.0, 1.15, lengthVariation) : Lerp(.6, 1.2, lengthVariation));
 				const double tilt = Lerp(0.0, g.structural?0.1:0.25, Random01(cx.seed, nk, 2));
 				const double az = Random01(cx.seed, nk, 3) * 2.0 * m::kPi;
 				const V axis = Unit(P.n + (P.t * std::cos(az) + P.b * std::sin(az)) * tilt, P.n);
-				const V root = P.o + P.t * nailU + P.b * nailV + P.n * (hh - P.D) - axis * embedNail;
+				const V root = seat->front - axis * embedNail;
 				const int nailSides=g.structural?std::clamp(int(std::round(8*p.detail)),4,16):8;
                 const int headSides=g.structural?std::clamp(int(std::round(12*p.detail)),4,24):12;
 				m::Manifold shank = m::Manifold::Cylinder(g.structural?std::max(.001,len-.6*rad):len, rad, rad, nailSides);

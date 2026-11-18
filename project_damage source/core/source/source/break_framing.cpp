@@ -30,6 +30,7 @@
 
 #include "break_framing.h"
 #include "project_damage_bvh.h"
+#include "framing_nail_anchor.h"
 
 #include <algorithm>
 #include <cmath>
@@ -363,7 +364,8 @@ Sizes SizesOf(const BreakRebarParams& p)
 	s.reach = std::max(0.0, p.cavityReach * sc);
 	s.tear = std::max(0.0, p.paperTear * sc);
 	s.paper = std::clamp(p.paperDepth * sc, 0.0, 0.8 * s.skin);
-	s.nailLen = std::max(0.0, p.nailLength);
+	// Preserve the default 12.5 mm drywall look independently of the current skin.
+	s.nailLen = std::max(0.0, p.nailLength) * 1.25 * sc;
 	s.broken = std::clamp(p.woodBroken, 0.0, 1.0);
 	s.nails = std::clamp(p.nails, 0.0, 1.0);
 	s.facetCos = std::cos(0.5 * std::clamp(p.facetAngle, 1.0, 90.0) * kPi / 180.0);                                   
@@ -925,7 +927,7 @@ PieceMesh LumberMesh(const Member& mb)
 
                                                                               
 // строим гвоздь с выступающей и заглублённой частями
-PieceMesh NailMesh(const EVec& base, const EVec& out, double stick, double rs, uint64_t key)
+PieceMesh NailMesh(const EVec& base, const EVec& out, double stick, double rs, double timberDepth, uint64_t key)
 {
 	PieceMesh pm;
 	pm.part = 1;
@@ -938,7 +940,7 @@ PieceMesh NailMesh(const EVec& base, const EVec& out, double stick, double rs, u
 	const bool bent = U01(key, 3) < 0.3;
 	const double bendAt = Range(key, 4, 0.35, 0.8) * stick, bendAng = bent ? Range(key, 5, 0.3, 1.1) : 0.0;
 	const EVec bendAxis = Normalized(m::la::cross(dir, side * std::cos(la + 1.3) + side2 * std::sin(la + 1.3)), side);
-	const double embed = std::max(0.8, 6.0 * rs);
+	const double embed = std::min(.75 * timberDepth, std::max(0.8, 6.0 * rs));
 	const double rh = rs * 2.6, th = rs * 0.8;
 	const double hs[6] = { -embed, -embed, stick, stick, stick + th, stick + th };
 	const double rr[6] = { 0.0, rs, rs, rh, rh, 0.0 };
@@ -982,7 +984,7 @@ PieceMesh NailMesh(const EVec& base, const EVec& out, double stick, double rs, u
 }
 
                                                                                            
-bool ClipToSource(PieceMesh& pm, const m::Manifold& source)
+bool ClipToSource(PieceMesh& pm, const m::Manifold& source, m::Manifold& timber)
 {
 	m::MeshGL64 mg;
 	mg.numProp = 3;
@@ -1017,6 +1019,7 @@ bool ClipToSource(PieceMesh& pm, const m::Manifold& source)
 	for (size_t t = 0; t < r.NumTri(); t++)
 		np.polys.push_back({ (int32_t)r.triVerts[t * 3], (int32_t)r.triVerts[t * 3 + 1], (int32_t)r.triVerts[t * 3 + 2], (int32_t)r.triVerts[t * 3 + 2] });
 	pm = std::move(np);
+	timber = kept;
 	return true;
 }
 
@@ -1384,21 +1387,31 @@ void BuildBreakFraming(const m::Manifold& source, const std::vector<m::Manifold>
 			const EVec mid = mb.o + mb.u * (0.5 * mb.len) + mb.k * (0.5 * mb.d);
 			outside = !solid.Inside(q + (mid - q) * 0.02);
 		}
-		if (outside) ClipToSource(pm, source);
+		m::Manifold clippedTimber;
+		if (outside) ClipToSource(pm, source, clippedTimber);
+		const bool hasTimber = !pm.polys.empty();
 		meshes[(size_t)i] = std::move(pm);
-		if (mb.kind == kNoggin || sz.nails <= 0.0 || cut.empty()) return;
+		if (!hasTimber || mb.kind == kNoggin || sz.nails <= 0.0 || cut.empty()) return;
 		const double nailStep = mb.kind == kStud ? 20.0 * std::clamp(p.scale, 0.01, 100.0) : 30.0 * std::clamp(p.scale, 0.01, 100.0);
 		const double rs = std::max(0.05, 0.05 * mb.w);
 		for (double sAlong = Range(mb.key, 0xC0, 3.0, nailStep); sAlong < mb.len - 2.0; sAlong += nailStep * Range(mb.key, (uint64_t)(0xC1 + sAlong), 0.8, 1.2))
 		{
 			const uint64_t nk = Key(mb.key, 0x4A11, (uint64_t)std::llround(sAlong * 10.0));
 			const double tAcross = Range(nk, 1, -0.2, 0.2) * mb.w;
-			const EVec face = mb.o + mb.u * sAlong + mb.v * tAcross;
+			EVec face = mb.o + mb.u * sAlong + mb.v * tAcross;
+			double timberDepth = mb.d;
+			if (outside)
+			{
+				const auto support = FindFramingNailSupport(clippedTimber, face, -mb.k, mb.d + 1.0);
+				if (!support) continue;
+				face = support->front;
+				timberDepth = support->depth;
+			}
 			                                                                   
 			if (!inCut(face - mb.k * (0.5 * sz.skin))) continue;
 			if (U01(nk, 2) >= sz.nails) continue;
-			const double stick = std::max(1.0, sz.skin) * sz.nailLen * Range(nk, 3, 1.6, 3.0);
-			nails[(size_t)i].push_back(NailMesh(face, -mb.k, stick, rs, nk));
+			const double stick = sz.nailLen * Range(nk, 3, 1.6, 3.0);
+			nails[(size_t)i].push_back(NailMesh(face, -mb.k, stick, rs, timberDepth, nk));
 		}
 	});
 	auto append = [&](const PieceMesh& pm)

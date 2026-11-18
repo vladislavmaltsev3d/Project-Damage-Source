@@ -39,7 +39,7 @@
 #include "manifold/manifold.h"
 #include "manifold/cross_section.h"
 #include "broken_glass.h"
-#include "project_damage_bvh.h"
+#include "through_wall_exit.h"
 #include "project_damage_host.h"
 #include "project_damage_noise.h"
 #include <algorithm>
@@ -170,10 +170,8 @@ struct Pane {
 		o.top = R - d1;
 		o.nrm = hn;
 		const double back = 10.0 * eps;
-		double d2 = 0.0;
-		double th = 1e300;
-		if (bvh.Raycast(P + N * (o.top - back), -N, 1.5 * throughMax + margin, &d2)) th = d2 + back;
-		if (th <= throughMax) { o.th = th; o.through = true; }
+		const double th = FindWallExit(bvh, *v, P + N * o.top, N, back, 1.5 * throughMax + margin);
+		if (th > 0.0 && th <= throughMax) { o.th = th; o.through = true; }
 		else { o.th = pocket; o.through = false; }
 		return true;
 	}
@@ -212,9 +210,8 @@ bool BuildPane(const CoreInput& in, const BrokenGlassParams& p, Pane& s)
 
 	std::vector<double> dist(s.tris.size(), -1.0);
 	ProjectDamageParallelFor(0, int64_t(s.tris.size()), [&](int64_t i) {
-		double d = 0.0;
-		const V org = s.tc[size_t(i)] - s.tn[size_t(i)] * (10.0 * s.eps);
-		if (s.bvh.Raycast(org, -s.tn[size_t(i)], 2.0 * s.diag, &d)) dist[size_t(i)] = d + 10.0 * s.eps;
+		dist[size_t(i)] = FindWallExit(s.bvh, v, s.tc[size_t(i)], s.tn[size_t(i)],
+		                              10.0 * s.eps, 2.0 * s.diag);
 	});
 	{
 		std::vector<std::pair<double, double>> da;
@@ -231,7 +228,7 @@ bool BuildPane(const CoreInput& in, const BrokenGlassParams& p, Pane& s)
 	if (s.thin) {
 		s.layer = s.T;
 		s.throughMax = 3.0 * s.T;
-		s.pocket = s.T;
+		s.pocket = std::min(skin, 0.6 * s.T);
 	} else {
 		s.layer = skin;
 		s.throughMax = skin;
@@ -322,6 +319,8 @@ m::Manifold Drape(const Pane& s, const m::Polygons& polys, const Frame& f, doubl
 						}
 					}
 			h[i] = h[best];
+			h[i].th = s.pocket;
+			h[i].through = false;
 		}
 	}
 	for (size_t i = 0; i < np; ++i) {

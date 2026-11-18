@@ -41,19 +41,15 @@
 //      the opening (straight through), so each shard is a loose piece. With
 //      through, the shard zone outside the opening is unchanged.
 //   7. straight through (thicknessLogic 2: Hit Glass, Glass Drawn, Broken
-//      Glass Through): no pane / skin decision and no thickness settings. The
-//      opening (with its dagger shards) and the shard gaps are straight prisms
-//      along the impact normal, from above the surface out past the far side
-//      of the mesh, so they cut through every wall behind them like a Boolean
-//      (a cube gets a tunnel with the same outline on its front and back).
-//      Cracks and chips stay grooves, sized by the measured local thickness.
+//      Glass Through): openings and shard gaps use the impact normal and
+//      end at the measured local back face. Cracks and chips stay grooves.
 // Every impact draws from its own SplitMix64 stream keyed by seed (main seed
 // and Glass Seed) and impact id, so adding an impact or a stroke never
 // reshuffles the others.
 #include "manifold/manifold.h"
 #include "manifold/cross_section.h"
 #include "broken_glass.h"
-#include "project_damage_bvh.h"
+#include "through_wall_exit.h"
 #include "project_damage_host.h"
 #include "project_damage_noise.h"
 #include <algorithm>
@@ -175,7 +171,7 @@ struct Pane {
 
 	                                                                         
 	                                                                          
-	bool Span(const V& P, const V& N, double R, SpanHit& o, bool useAvoid) const
+	bool Span(const V& P, const V& N, double R, SpanHit& o, bool useAvoid, bool straight = false) const
 	{
 		double d1 = 0.0;
 		int32_t poly = -1;
@@ -184,15 +180,15 @@ struct Pane {
 		if (m::la::dot(polyN[size_t(poly)], N) < 0.25) return false;                         
 		V n = smoothN[size_t(poly)];
 		if (m::la::dot(n, N) < 0.2) n = polyN[size_t(poly)];
+		if (straight) n = N;
 		o.top = R - d1;
 		o.nrm = n;
 		o.poly = poly;
 		const V S = P + N * o.top;
 		o.S = S;
 		const double back = 10.0 * eps;
-		double d2 = 0.0;
-		o.th = 1e300;
-		if (bvh.Raycast(S - n * back, -n, probe, &d2)) o.th = d2 + back;
+		const double measured = FindWallExit(bvh, *v, S, n, back, straight ? 2.0 * diag : probe);
+		o.th = measured > 0.0 ? measured : 1e300;
 		return true;
 	}
 };
@@ -204,8 +200,6 @@ struct Pane {
 struct Mode {
 	bool through = true;
 	bool straight = false;                                                                            
-	double cutFront = 0.0;
-	double cutBack = 0.0;
 	double tLoc = 0.0;                                               
 	double depth = 0.0;                              
 	double margin = 0.0;                                                   
@@ -216,10 +210,11 @@ struct Mode {
 	                                                                   
 	                                                                           
 	                                    
-	double ThroughDepth(const SpanHit& h) const { return std::min(h.th < 1e299 ? h.th : tLoc, 1.6 * tLoc); }
+	bool Verified(const SpanHit& h) const { return h.th < 1e299; }
+	double ThroughDepth(const SpanHit& h) const { return straight ? h.th : std::min(h.th, 1.6 * tLoc); }
 	                                                                    
 	double SkinDepth(const SpanHit& h) const { return std::min(depth, 0.6 * (h.th < 1e299 ? h.th : depth / 0.6)); }
-	double Thickness(const SpanHit& h) const { return through ? ThroughDepth(h) : SkinDepth(h); }
+	double Thickness(const SpanHit& h) const { return through && Verified(h) ? ThroughDepth(h) : SkinDepth(h); }
 };
 
 // основной вход: собираем геометрию по переданным настройкам
@@ -255,9 +250,8 @@ bool BuildPane(const CoreInput& in, const BrokenGlassParams& p, Pane& s)
 
 	std::vector<double> dist(s.tris.size(), -1.0);
 	ProjectDamageParallelFor(0, int64_t(s.tris.size()), [&](int64_t i) {
-		double d = 0.0;
-		const V org = s.tc[size_t(i)] - s.tn[size_t(i)] * (10.0 * s.eps);
-		if (s.bvh.Raycast(org, -s.tn[size_t(i)], 2.0 * s.diag, &d)) dist[size_t(i)] = d + 10.0 * s.eps;
+		dist[size_t(i)] = FindWallExit(s.bvh, v, s.tc[size_t(i)], s.tn[size_t(i)],
+		                              10.0 * s.eps, 2.0 * s.diag);
 	});
 	{
 		std::vector<std::pair<double, double>> da;
@@ -373,12 +367,13 @@ m::Manifold Drape(const Pane& s, const m::Polygons& polys, const Frame& f, doubl
 	m::MeshGL64 mesh = prism.GetMeshGL64();
 	const size_t np = mesh.vertProperties.size() / mesh.numProp;
 	const V N = f.n * side;
+	const bool straight = md.straight && !scoop;
 	std::vector<SpanHit> h(np);
 	std::vector<char> ok(np, 0);
 	const double R = reach + md.layer + md.top;
 	ProjectDamageParallelFor(0, int64_t(np), [&](int64_t i) {
 		const double* v = &mesh.vertProperties[size_t(i) * mesh.numProp];
-		if (s.Span(f.World(V2(v[0], v[1])), N, R, h[size_t(i)], scoop)) ok[size_t(i)] = 1;
+		if (s.Span(f.World(V2(v[0], v[1])), N, R, h[size_t(i)], scoop, straight)) ok[size_t(i)] = 1;
 	});
 	std::vector<size_t> good;
 	for (size_t i = 0; i < np; ++i) if (ok[i]) good.push_back(i);
@@ -416,9 +411,10 @@ m::Manifold Drape(const Pane& s, const m::Polygons& polys, const Frame& f, doubl
 			                                                           
 			const V P0 = f.World(q) + N * h[best].top;
 			SpanHit r;
-			if (s.Span(P0, h[best].nrm, R, r, scoop) && m::la::length(r.S - P0) < R) { h[i] = r; continue; }
+			if (s.Span(P0, h[best].nrm, R, r, scoop, straight) && m::la::length(r.S - P0) < R) { h[i] = r; continue; }
 			h[i] = h[best];
 			h[i].S = P0;
+			h[i].th = 1e300;
 		}
 	}
 	std::vector<V> dir(np);
@@ -430,14 +426,14 @@ m::Manifold Drape(const Pane& s, const m::Polygons& polys, const Frame& f, doubl
 		const double top = md.top;
 		double bot;
 		if (scoop) bot = -ClampD(depthOf(q), 0.02, 0.95) * md.Thickness(h[i]);
-		else if (md.through) bot = -md.ThroughDepth(h[i]) - md.margin;
+		else if (md.through && md.Verified(h[i])) bot = -md.ThroughDepth(h[i]) - std::max(0.01, 4.0 * s.eps);
 		else bot = -md.SkinDepth(h[i]);
-		dir[i] = Unit(h[i].nrm, N);
+		dir[i] = straight ? N : Unit(h[i].nrm, N);
 		off[i] = Lerp(bot, top, w);
 	}
 	                                                                        
 	                                                                 
-	const int relax = scoop ? 0 : 6;
+	const int relax = scoop || straight ? 0 : 6;
 	const std::vector<double> off0(off);
 	for (int it = 0; it < relax; ++it) {
 		std::vector<V> dsum(dir);
@@ -467,20 +463,6 @@ m::Manifold Drape(const Pane& s, const m::Polygons& polys, const Frame& f, doubl
                                                                            
                                                                            
                                                                              
-m::Manifold StraightCut(const m::Polygons& polys, const Frame& f, double top, double far)
-{
-	m::Manifold prism = m::Manifold::Extrude(polys, top + far);
-	if (prism.Status() != m::Manifold::Error::NoError || prism.NumTri() == 0) return m::Manifold();
-	m::MeshGL64 mesh = prism.GetMeshGL64();
-	const size_t np = mesh.vertProperties.size() / mesh.numProp;
-	for (size_t i = 0; i < np; ++i) {
-		double* v = &mesh.vertProperties[i * mesh.numProp];
-		const V P = f.World(V2(v[0], v[1])) + f.n * (v[2] - far);
-		v[0] = P.x; v[1] = P.y; v[2] = P.z;
-	}
-	return Oriented(mesh);
-}
-
                                                                        
                                                                              
                                                                            
@@ -917,7 +899,8 @@ void RemoveIslands(const Pane& s, const Frame& f, double reach, const Mode& md, 
 	const m::CrossSection window(m::Polygons{{lo, V2(hi.x, lo.y), hi, V2(lo.x, hi.y)}});
 	const m::CrossSection inner(m::Polygons{{lo + V2(band), V2(hi.x - band, lo.y + band), hi - V2(band), V2(lo.x + band, hi.y - band)}});
 	const m::CrossSection ring = window - inner;
-	const m::CrossSection pane = m::CrossSection::BatchBoolean(tris, m::OpType::Add) ^ window;
+	const m::CrossSection paneAll = m::CrossSection::BatchBoolean(tris, m::OpType::Add);
+	const m::CrossSection pane = paneAll ^ window;
 	const m::CrossSection rest = pane - hole;
 	                                                                         
 	                                                                       
@@ -925,8 +908,17 @@ void RemoveIslands(const Pane& s, const Frame& f, double reach, const Mode& md, 
 	const double grow = std::max(2.0 * md.layer, 0.01 * std::max(hi.x - lo.x, hi.y - lo.y));
 	const double holeArea = hole.Area();
 	const m::CrossSection touch = hole.Offset(grow, m::CrossSection::JoinType::Miter);
+	// The border of the glass anchors pieces just like the window band does.
+	// A large drawn hole (with blowout notches) can reach past the pane edge;
+	// the window then lies outside the pane, no piece touches the band and
+	// every remaining frame piece was taken for a loose island, removing the
+	// whole pane. Slivers between triangles are opened away first.
+	const m::CrossSection beyond = (window - paneAll)
+		.Offset(-0.25 * grow, m::CrossSection::JoinType::Miter)
+		.Offset(1.25 * grow, m::CrossSection::JoinType::Miter);
+	const m::CrossSection anchor = ring + beyond;
 	for (const m::CrossSection& piece : rest.Decompose()) {
-		if ((piece ^ ring).Area() > 1e-9 * (hi.x - lo.x) * (hi.y - lo.y)) continue;                            
+		if ((piece ^ anchor).Area() > 1e-9 * (hi.x - lo.x) * (hi.y - lo.y)) continue;                            
 		if (piece.Area() > holeArea) continue;                                                                         
 		if ((piece ^ touch).Area() <= 0.0) continue;                                                             
 		hole = hole + (piece.Offset(grow, m::CrossSection::JoinType::Miter) - (rest - piece));
@@ -946,7 +938,7 @@ bool ImpactMode(const Pane& s, const BrokenGlassParams& p, const Frame& f, doubl
 	for (int k = -1; k < 12; ++k) {
 		const V2 q = k < 0 ? V2(0.0) : V2(std::cos(k * m::kPi / 6.0), std::sin(k * m::kPi / 6.0)) * (0.5 * R);
 		SpanHit h;
-		if (!s.Span(f.World(q), f.n, probeR, h, false)) continue;
+		if (!s.Span(f.World(q), f.n, probeR, h, false, p.thicknessLogic == 2)) continue;
 		th.push_back(h.th);
 	}
 	if (th.empty()) return false;
@@ -956,21 +948,13 @@ bool ImpactMode(const Pane& s, const BrokenGlassParams& p, const Frame& f, doubl
 		                                                                    
 		                                                                     
 		                                                                  
-		md.through = true;
+		md.through = med < 1e299;
 		md.straight = true;
 		md.tLoc = med < 1e299 ? med : s.skin / 0.6;
-		md.depth = md.tLoc;
-		md.layer = std::min(md.tLoc, std::max(0.5 * R, s.skin));
+		md.depth = std::min(s.skin, 0.6 * md.tLoc);
+		md.layer = md.through ? std::min(md.tLoc, std::max(0.5 * R, s.skin)) : md.depth;
 		md.margin = std::max(ClampD(p.cutMargin, 0.05, 4.0) * md.layer, std::max(4.0 * s.eps, 1e-3 * s.diag));
 		md.top = std::max(md.margin, 0.25 * R);
-		const MeshView& v = *s.v;
-		for (int32_t i = 0; i < v.npts; ++i) {
-			const double along = m::la::dot(v.pts[i] - f.o, f.n);
-			md.cutFront = std::max(md.cutFront, along);
-			md.cutBack = std::max(md.cutBack, -along);
-		}
-		md.cutFront += md.margin;
-		md.cutBack += md.margin;
 		return md.layer > 0.0;
 	}
 	md.through = s.thin && med <= 2.5 * s.T;
@@ -1307,8 +1291,7 @@ void PlaceBrokenGlassImpl(const CoreInput& in, const BrokenGlassParams& pIn, Int
 			}
 			const m::Polygons polys = cs.ToPolygons();
 			if (!polys.empty() && cs.Area() > 1e-9) {
-				m::Manifold cut = md.straight ? StraightCut(polys, op.f, md.cutFront, md.cutBack)
-					: Drape(s, polys, op.f, 1.0, op.reach, cell, md, false, [](const V2&) { return 1.0; });
+				m::Manifold cut = Drape(s, polys, op.f, 1.0, op.reach, cell, md, false, [](const V2&) { return 1.0; });
 				if (cut.NumTri() > 0) out.hole = std::move(cut);
 			}
 		}
@@ -1457,8 +1440,7 @@ void PlaceBrokenGlassImpl(const CoreInput& in, const BrokenGlassParams& pIn, Int
 					const CS gapsCS = kept.empty() ? zone : zone - CS::BatchBoolean(kept, m::OpType::Add);
 					const m::Polygons polys = gapsCS.ToPolygons();
 					if (!polys.empty() && gapsCS.Area() > 1e-12) {
-						m::Manifold cut = md.straight ? StraightCut(polys, op.f, md.cutFront, md.cutBack)
-							: Drape(s, polys, op.f, 1.0, op.reach, std::min(cell, 4.0 * g), md, false,
+						m::Manifold cut = Drape(s, polys, op.f, 1.0, op.reach, std::min(cell, 4.0 * g), md, false,
 								[](const V2&) { return 1.0; });
 						if (cut.NumTri() > 0) out.gaps = std::move(cut);
 					}
@@ -1472,7 +1454,8 @@ void PlaceBrokenGlassImpl(const CoreInput& in, const BrokenGlassParams& pIn, Int
 			const m::CrossSection zone = pieceZone + filled;
 			const m::Polygons polys = zone.ToPolygons();
 			if (!polys.empty()) {
-				const m::Manifold keepOut = StraightCut(polys, op.f, md.cutFront, md.cutBack);
+				const m::Manifold keepOut = Drape(s, polys, op.f, 1.0, op.reach, cell, md, false,
+					[](const V2&) { return 1.0; });
 				if (keepOut.NumTri() > 0) out.cracks = out.cracks - keepOut;
 			}
 		}

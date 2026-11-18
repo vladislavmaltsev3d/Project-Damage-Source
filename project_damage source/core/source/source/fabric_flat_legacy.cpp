@@ -799,11 +799,19 @@ bool BuildFlatFabricLegacy(const CoreInput& in, const ProjectDamageParams& param
 		if (o3[0] == o3[1] || o3[1] == o3[2] || o3[0] == o3[2] || w.poly < 0) continue;
 		out.polys.push_back({ o3[0], o3[1], o3[2], o3[2] });
 		out.basePolyOf.push_back(w.poly);
-        out.effectIds.push_back(9);
+        out.effectIds.push_back(1009);
 		out.propCorner.insert(out.propCorner.end(), { c3[0], c3[1], c3[2], NOTOK });
 	}
 	                                                                          
 	fabric_surface::StitchRim(out, mesh, 1e-7 * diag + 1e-12);
+    // stitching can split a rim face, so collect its material region afterwards
+    for (size_t i = 0; i < out.effectIds.size(); ++i) {
+        if (out.effectIds[i] == 1009) {
+            out.holePolys.push_back(Int32(i));
+            out.effectIds[i] = 9;
+        }
+    }
+
 	const int sides = std::clamp(p.threadSides, 3, 12);
 	for (const Tube& tb : tubes)
 	{
@@ -832,12 +840,14 @@ bool BuildFlatFabricLegacy(const CoreInput& in, const ProjectDamageParams& param
 		const Int32 capB = (Int32)out.points.size(); out.points.push_back(tb.path.back());
 		(void)startPt;
 		auto quad = [&](Int32 a, Int32 b, Int32 c, Int32 d) {
+			out.buildPolys.push_back(Int32(out.polys.size()));
 			out.polys.push_back({ a, b, c, d });
 			out.basePolyOf.push_back(tb.poly);
             out.effectIds.push_back(9);
 			for (int k = 0; k < 4; ++k) out.propCorner.push_back(corner(V(out.points[(size_t)a]), uvOf(tb.poly, 0)));
 		};
 		auto tri3 = [&](Int32 a, Int32 b, Int32 c) {
+			out.buildPolys.push_back(Int32(out.polys.size()));
 			out.polys.push_back({ a, b, c, c });
 			out.basePolyOf.push_back(tb.poly);
             out.effectIds.push_back(9);

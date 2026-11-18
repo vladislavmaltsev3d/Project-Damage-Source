@@ -485,7 +485,7 @@ struct Builder
 	}
 
 	                                                     
-	void Emit(const BarPath& bp, const Polyline& pl, const Piece& pc)
+	void Emit(const BarPath& bp, const Polyline& pl, const Piece& pc, bool customPath = false)
 	{
 		const double r = bp.radius;
 		const double len = pc.s1 - pc.s0;
@@ -530,10 +530,30 @@ struct Builder
 				st.push_back(s);
 			}
 		}
+		std::vector<double> corners;
+		if (customPath)
+		{
+			for (size_t i = 1; i + 1 < pl.pts.size(); ++i)
+			{
+				const EVec before = Normalized(pl.pts[i] - pl.pts[i - 1], EVec(0, 0, 1));
+				const EVec after = Normalized(pl.pts[i + 1] - pl.pts[i], before);
+				if (m::la::dot(before, after) < .9999)
+					corners.push_back(pl.cum[i]);
+			}
+			const double gap = .2 * fine;
+			st.erase(std::remove_if(st.begin() + 1, st.end() - 1, [&](double s) {
+				const auto next = std::lower_bound(corners.begin(), corners.end(), s - gap);
+				return next != corners.end() && *next < s + gap;
+			}), st.end() - 1);
+			st.insert(st.end(), corners.begin(), corners.end());
+			std::sort(st.begin(), st.end());
+			if (st.size() * size_t(std::max(p.sides, 36)) > 1500000)
+				throw std::invalid_argument("Too many rebar polygons; reduce Resolution or increase Radius");
+		}
 		if (pc.loop && st.size() > 2)
 			st.pop_back();
 		size_t nr = st.size();
-		if (nr < 2)
+		if (nr < (customPath && pc.loop ? 3u : 2u))
 			return;
 
 		                                       
@@ -546,11 +566,25 @@ struct Builder
 			const double s = st[i];
 			const EVec pos = pl.At(s);
 			const EVec tan = pl.Tangent(s);
-			const EVec o = OutAt(bp, pos, tan);
+			EVec o;
+			if (customPath)
+			{
+				const size_t seg = pl.Seg(s);
+				const double t = std::clamp((s - pl.cum[seg]) / (pl.cum[seg + 1] - pl.cum[seg]), 0.0, 1.0);
+				const EVec normal = bp.outs[seg] * (1.0 - t) + bp.outs[seg + 1] * t;
+				o = Normalized(normal - tan * m::la::dot(normal, tan), AnyPerp(tan));
+			}
+			else
+				o = OutAt(bp, pos, tan);
 			const EVec side = Normalized(m::la::cross(tan, o), AnyPerp(tan));
 			const double e = exposureAt(s);
 			EVec d(0.0);
-			const double ww = wob * (0.3 + 0.7 * e);
+			double ww = wob * (0.3 + 0.7 * e);
+			if (customPath)
+			{
+				if (pc.end0 == 0) ww *= Smooth01((s - pc.s0) / (2.0 * r));
+				if (pc.end1 == 0) ww *= Smooth01((pc.s1 - s) / (2.0 * r));
+			}
 			if (ww > 0.0)
 			{
 				const double f = s / (10.0 * r);
@@ -585,7 +619,13 @@ struct Builder
 
 		                                                            
         if (bp.type != kPlankType && p.rebarResolution < 1.0) {
-            const auto ids=RebarLodIndices(c,r,p.rebarResolution,pc.loop);
+            auto ids=RebarLodIndices(c,r,p.rebarResolution,pc.loop);
+            if (customPath && !corners.empty()) {
+                for (double corner : corners)
+                    ids.push_back(size_t(std::lower_bound(st.begin(), st.end(), corner) - st.begin()));
+                std::sort(ids.begin(), ids.end());
+                ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+            }
             RebarLodSelect(c,ids);RebarLodSelect(outv,ids);RebarLodSelect(ex,ids);RebarLodSelect(st,ids);nr=c.size();
         }
 		std::vector<EVec> T(nr), N(nr);
@@ -3443,7 +3483,7 @@ uint64_t SkeletonKey(const BreakRebarParams& p, double sc, const std::vector<EVe
 
 // собираем профиль арматуры вдоль уже заданного пути
 void BuildRebarSurfacePath(const BreakRebarParams& p, const std::vector<EVec>& points,
-    const std::vector<EVec>& normals, bool freeStart, bool freeEnd, BreakRebarMesh& out)
+    const std::vector<EVec>& normals, bool freeStart, bool freeEnd, BreakRebarMesh& out, bool customPath)
 {
     out=BreakRebarMesh();
     if(points.size()<2 || points.size()!=normals.size() || points.size()>100000)
@@ -3468,8 +3508,10 @@ void BuildRebarSurfacePath(const BreakRebarParams& p, const std::vector<EVec>& p
     if(line.Length()/step*std::max(p.sides,36)>1500000.)throw std::invalid_argument("Too many rebar polygons; reduce Resolution or increase Radius");
     BreakRebarParams settings=p;settings.bow=0.;settings.bend=0.;
     Piece piece;piece.s0=0.;piece.s1=line.Length();piece.end0=freeStart?1:0;piece.end1=freeEnd?1:0;piece.key=bp.key;
+    piece.loop = customPath && !freeStart && !freeEnd && bp.pts.size() > 3
+        && m::la::length(bp.pts.front() - bp.pts.back()) < 1e-8;
     piece.spans.push_back({0.,line.Length(),!freeStart,!freeEnd});
-    Builder builder{settings,1.,out};builder.Emit(bp,line,piece);
+    Builder builder{settings,1.,out};builder.Emit(bp,line,piece,customPath);
 }
 
 static void BuildBreakRebarOne(const m::Manifold& source, const std::vector<m::Manifold>& cutters,

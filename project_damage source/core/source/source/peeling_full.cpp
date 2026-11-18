@@ -812,8 +812,8 @@ PassStats Engine::peelPass(const PassParams&c){
   }
   if(seedPts.empty())return stats;
  }
-  prof.mark("seeds");
-bool limited=probe>size*.126;
+ prof.mark("seeds");
+ bool limited=probe>size*.126;
  const double fine=1.-.4*c.ragged;
  const double contourStep=c.contour_step,bendStep=c.bend_step,reach=c.reach;
  KD seedTree(std::move(seedPts));const bool hasSeeds=!seedTree.p.empty();
@@ -908,11 +908,13 @@ bool limited=probe>size*.126;
   sel=closure(std::move(sel));
   const long long room=(((long long)(budget)-(long long)(aliveFaces))>=0)?((long long)(budget)-(long long)(aliveFaces))/2:-1;
   if(room<=0){limited=true;break;}
-  if((long long)sel.size()>room){sel.resize(size_t(room));limited=true;}
+  // Coarse seed sampling can report reduced detail before the face budget is reached.
+  const bool budgetLimited=(long long)sel.size()>room;
+  if(budgetLimited){sel.resize(size_t(room));limited=true;}
   auto updated=splitTriangles(sel);pool.clear();
   for(int e:updated)if(edges[e].alive&&edgeOk(edges[e]))pool.push_back(e);
   normalUpdate();
-  if(limited||pool.empty())break;
+  if(budgetLimited||pool.empty())break;
  }
  prof.mark("refine");
  normalUpdate();

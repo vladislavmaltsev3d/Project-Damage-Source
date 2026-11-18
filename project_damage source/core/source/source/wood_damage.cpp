@@ -47,7 +47,7 @@
 // use their own stream, global splits theirs.
 #include "manifold/manifold.h"
 #include "wood_damage.h"
-#include "project_damage_bvh.h"
+#include "through_wall_exit.h"
 #include "project_damage_host.h"
 #include "project_damage_noise.h"
 #include <algorithm>
@@ -668,7 +668,9 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 	const double cell = std::max(cu, cv);
 	auto I = [&](int i, int j) { return size_t(i) * size_t(nv + 1) + size_t(j); };
 	const size_t N = size_t(nu + 1) * size_t(nv + 1);
-	std::vector<double> h(N, 0.0), d(N, 0.0), sf(N, -1.0), s0(N, -1.0), thick(N, -1.0), endW(N, 0.0);
+    std::vector<double> h(N, 0.0), d(N, 0.0), sf(N, -1.0), s0(N, -1.0), thick(N, -1.0), endW(N, 0.0);
+    std::vector<double> holeExit;
+    if (P.brk) holeExit.assign(N, -1.0);
 	std::vector<char> valid(N, 0), holeF(N, 0), forbid(N, 0), outside(N, 0);
 	std::vector<int32_t> stripOf(N, 0);
 
@@ -688,7 +690,11 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 				const V S = P.o + P.t * u + P.b * v + P.n * h[k];
 				double th = 0.0;
 				int32_t tp = -1;
-				if (s.Ray(S - P.n * (1e-5 * s.diag), -P.n, 2.0 * s.diag, th, tp)) thick[k] = th;
+				if (s.Ray(S - P.n * (1e-5 * s.diag), -P.n, 2.0 * s.diag, th, tp)) {
+                    thick[k] = th;
+                    if (!holeExit.empty() && IsOpposingWallExit(*s.v, tp, th, P.n))
+                        holeExit[k] = th + 1e-5 * s.diag;
+                }
 			}
 		}
 	                                                                    
@@ -846,13 +852,13 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 				if (grooves) dd += p.grooveDepth * Groove(cx, W, P.t, P.b, P.n, 0.0);
 				dd = std::max(dd, 0.25 * p.grooveDepth * Smooth(0.0, Wall, sv));
 				if (thick[k] > 0.0) dd = std::min(dd, cap * thick[k]);
-				if (P.brk) {
+				if (P.brk && holeExit[k] > 0.0) {
 					                                                          
 					const double sd = L > 1 ? layerField(k, v, L - 1) : sv;
 					const double sh = sd - breakThr + ampB * Fbm(V(u / (2.0 * featOut), v / (0.5 * featOut), 0.0) + P.off + V(-21.0, 4.0, 13.0), 4);
 					if (sh > 0.0) {
 						const double f = Smooth(0.0, 0.7 * Wall, sh);
-						const double through = (thick[k] > 0.0 ? thick[k] : 3.0 * P.D + extU) + margin;
+						const double through = holeExit[k] + std::max(0.01, 1e-6 * s.diag);
 						dd = Lerp(dd, through, f);
 						if (f > 0.5) holeF[k] = 1;
 					}

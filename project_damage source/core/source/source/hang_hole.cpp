@@ -25,7 +25,7 @@
 #include "hang_hole.h"
 #include "surface_noise.h"
 #include "break_texture.h"
-#include "project_damage_bvh.h"
+#include "through_wall_exit.h"
 #include "project_damage_internal.h"
 #include <algorithm>
 #include <cmath>
@@ -173,18 +173,7 @@ struct Ctx
 	double Thickness(const V& q, const V& n, double requestedReach = 0.0) const
 	{
 		const double rayReach = std::max(0.5 * diag, std::min(diag, requestedReach));
-		V o = q - n * eps;
-		double done = 0.0;
-		for (int g = 0; g < 32; ++g)
-		{
-			double d = 0.0; int32_t poly = -1;
-			if (!bvh.Raycast(o, n * -1.0, rayReach, &d, &poly)) return -1.0;
-			done += d;
-			if (poly >= 0 && m::la::dot(fn[(size_t)poly], n) < -0.1) return done;
-			o = o - n * (d + eps);
-			done += eps;
-		}
-		return -1.0;
+		return FindWallExit(bvh, *mv, q, n, eps, rayReach);
 	}
 };
 
