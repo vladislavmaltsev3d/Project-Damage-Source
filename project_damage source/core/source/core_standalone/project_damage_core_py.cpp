@@ -29,6 +29,7 @@
 // the session Cache and MeshWeightMask (the module's own damage mask).
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 #include "impact_deform.h"
 #include "ivy_generator.h"
@@ -494,6 +495,7 @@ static nb::dict ResultToDict(const CoreResult& res, bool haveUvsIn)
     d["lath_points"]=ToNumpy2D(std::move(lathXYZ),3);
     d["lath_polys"]=ToNumpy2D(std::move(lathABCD),4);
     d["lath_piece"]=ToNumpy1D(std::vector<int32_t>(res.lathPiece));
+    d["lath_instance"]=ToNumpy1D(std::vector<int32_t>(res.lathInstance));
     std::vector<double> debrisXYZ;
     for(const auto& p:res.debrisPoints) {debrisXYZ.push_back(p.x);debrisXYZ.push_back(p.y);debrisXYZ.push_back(p.z);}
     std::vector<int32_t> debrisABCD;
@@ -644,12 +646,49 @@ static nb::dict ResultToDict(const CoreResult& res, bool haveUvsIn)
     d["rebar_brick_cut"]=ToNumpy2D(std::vector<double>(res.rebarBrickCut),8);
     d["rebar_exposure"]=ToNumpy1D(std::vector<float>(res.rebarExposure));
     d["rebar_bars"]=res.rebarBars;
+    nb::dict booleanFills;
+    for (const auto& [serial, mesh] : res.booleanFills) {
+        nb::dict geometry;
+        std::vector<double> points;
+        std::vector<int32_t> faces;
+        points.reserve(mesh.points.size() * 3);
+        faces.reserve(mesh.polys.size() * 4);
+        for (const auto& p : mesh.points) points.insert(points.end(), {p.x, p.y, p.z});
+        for (const auto& f : mesh.polys) faces.insert(faces.end(), {f.a, f.b, f.c, f.d});
+        geometry["rebar_points"] = ToNumpy2D(std::move(points), 3);
+        geometry["rebar_polys"] = ToNumpy2D(std::move(faces), 4);
+        geometry["rebar_bar"] = ToNumpy1D(std::vector<int32_t>(mesh.polyBar));
+        geometry["rebar_part"] = ToNumpy1D(std::vector<int32_t>(mesh.polyPart));
+        geometry["rebar_grain"] = ToNumpy1D(std::vector<float>(mesh.grain));
+        geometry["rebar_exposure"] = ToNumpy1D(std::vector<float>(mesh.exposure));
+        geometry["rebar_brick_frame"] = ToNumpy2D(std::vector<double>(mesh.brickFrame), 12);
+        geometry["rebar_brick_key"] = ToNumpy1D(std::vector<int32_t>(mesh.brickKey));
+        geometry["rebar_brick_cut"] = ToNumpy2D(std::vector<double>(mesh.brickCut), 8);
+        geometry["rebar_bars"] = mesh.bars;
+        booleanFills[nb::int_(serial)] = geometry;
+    }
+    d["boolean_fills"] = booleanFills;
+    nb::dict booleanBodies;
+    for (const auto& body : res.booleanBodies) {
+        nb::dict geometry;
+        std::vector<double> points;
+        std::vector<int32_t> polys;
+        points.reserve(body.points.size() * 3);
+        polys.reserve(body.polys.size() * 4);
+        for (const auto& p : body.points) points.insert(points.end(), {p.x, p.y, p.z});
+        for (const auto& f : body.polys) polys.insert(polys.end(), {f.a, f.b, f.c, f.d});
+        geometry["points"] = ToNumpy2D(std::move(points), 3);
+        geometry["polys"] = ToNumpy2D(std::move(polys), 4);
+        booleanBodies[nb::int_(body.serial)] = geometry;
+    }
+    d["boolean_bodies"] = booleanBodies;
     std::vector<double> crPoints;
     for(const auto& p:res.concreteRebarPoints) { crPoints.push_back(p.x);crPoints.push_back(p.y);crPoints.push_back(p.z); }
     std::vector<int32_t> crPolys;
     for(const auto& p:res.concreteRebarPolys) { crPolys.push_back(p.a);crPolys.push_back(p.b);crPolys.push_back(p.c);crPolys.push_back(p.d); }
     d["concrete_rebar_points"]=ToNumpy2D(std::move(crPoints),3);
     d["concrete_rebar_polys"]=ToNumpy2D(std::move(crPolys),4);
+    d["concrete_rebar_instance"]=ToNumpy1D(std::vector<int32_t>(res.concreteRebarInstance));
 
     d["counts"] = std::make_tuple((int64_t)res.points.size(), (int64_t)res.polys.size(),
 		(int64_t)res.chipPolys.size());
@@ -2146,8 +2185,19 @@ static nb::dict GrowIvyPy(PointsIn points, PolysIn polys, PointsIn seeds, const 
 }
 
                                             
+using WeldEdgesIn = nb::ndarray<int32_t, nb::shape<-1, 2>, nb::c_contig, nb::device::cpu>;
+
+static WeldEdgePairs WeldPairs(const std::optional<WeldEdgesIn>& input)
+{
+	WeldEdgePairs edges(input ? input->shape(0) : 0);
+	for (size_t i = 0; i < edges.size(); ++i)
+		edges[i] = {(*input)(i, 0), (*input)(i, 1)};
+	return edges;
+}
+
 static nb::dict BuildWeldsPy(PointsIn points, PolysIn polys, nb::ndarray<float, nb::ndim<1>, nb::c_contig, nb::device::cpu> weightsIn,
-	std::vector<PointsIn> strokesIn, const WeldParams& params, bool surfaceGuide)
+	std::vector<PointsIn> strokesIn, const WeldParams& params, bool surfaceGuide,
+	std::optional<WeldEdgesIn> edgeSelection, std::optional<WeldEdgesIn> edgeExclusion)
 {
 	const size_t nv = points.shape(0), np = polys.shape(0);
 	std::vector<EVec> pts(nv);
@@ -2162,12 +2212,14 @@ static nb::dict BuildWeldsPy(PointsIn points, PolysIn polys, nb::ndarray<float, 
 		for (size_t i = 0; i < s.size(); ++i) s[i] = EVec(g(i, 0), g(i, 1), g(i, 2));
 		if (s.size() >= 2) strokes.push_back(std::move(s));
 	}
+	const WeldEdgePairs selectedEdges = WeldPairs(edgeSelection), excludedEdges = WeldPairs(edgeExclusion);
 	WeldResult r;
 	{
 		nb::gil_scoped_release release;
         MeshView view{pts.data(),int32_t(nv),pl.data(),int32_t(np)};
         SurfaceGuidance guide; if(surfaceGuide)guide.Bind(view);
-		BuildWelds(view, wts, strokes, params, r);
+		BuildWelds(view, wts, strokes, params, r, edgeSelection ? &selectedEdges : nullptr,
+			edgeExclusion ? &excludedEdges : nullptr);
 	}
 	std::vector<double> pp, uv(r.uvs);
 	std::vector<int32_t> ff;
@@ -2712,16 +2764,17 @@ static nb::dict BuildWoodSplitMeshPy(const nb::dict& settings, PdGenF64 points, 
 NB_MODULE(project_damage_core_py, mod)
 {
  mod.def("build_rebar_surface_path",[](const BreakRebarParams& p,const std::vector<double>& xyz,
- const std::vector<double>& normal,bool freeStart,bool freeEnd){
+ const std::vector<double>& normal,bool freeStart,bool freeEnd,bool customPath){
   if(xyz.size()!=normal.size() || xyz.size()%3 || xyz.size()>300000)throw nb::value_error("Invalid structural rebar coordinates");
   std::vector<EVec> points,normals;points.reserve(xyz.size()/3);normals.reserve(xyz.size()/3);
   for(size_t i=0;i<xyz.size();i+=3){points.emplace_back(xyz[i],xyz[i+1],xyz[i+2]);normals.emplace_back(normal[i],normal[i+1],normal[i+2]);}
-  BreakRebarMesh out;{nb::gil_scoped_release release;BuildRebarSurfacePath(p,points,normals,freeStart,freeEnd,out);}
+  BreakRebarMesh out;{nb::gil_scoped_release release;BuildRebarSurfacePath(p,points,normals,freeStart,freeEnd,out,customPath);}
   std::vector<double> verts;std::vector<int32_t> faces;
   for(const auto& q:out.points){verts.push_back(q.x);verts.push_back(q.y);verts.push_back(q.z);}
   for(const auto& f:out.polys){faces.push_back(f.a);faces.push_back(f.b);faces.push_back(f.c);faces.push_back(f.d);}
   nb::dict result;result["points"]=ToNumpy2D(std::move(verts),3);result["polys"]=ToNumpy2D(std::move(faces),4);return result;
- });
+ },nb::arg("settings"),nb::arg("points"),nb::arg("normals"),nb::arg("free_start"),nb::arg("free_end"),
+   nb::arg("custom_path")=false);
 
  mod.def("build_brick_surface",[](const BrickDamageParams& p,const std::vector<double>& uv,const std::vector<double>& xyz,const std::vector<double>& normals,
  double u0,double u1,double v0,double v1,int nu,int nv,const std::vector<double>& damage,const std::vector<double>& loose,double offset,double opening){
@@ -4324,7 +4377,8 @@ NB_MODULE(project_damage_core_py, mod)
 
 	nb::class_<BreakerSpec>(mod, "BreakerSpec")
 		.def(nb::init<>())
-		.def_rw("mode", &BreakerSpec::mode)
+		.def_rw("boolean_owner", &BreakerSpec::booleanOwner)
+        .def_rw("mode", &BreakerSpec::mode)
 		.def_rw("flip", &BreakerSpec::flip)
 		.def_rw("seed", &BreakerSpec::seed)
 		.def_rw("length", &BreakerSpec::length)
@@ -4417,11 +4471,26 @@ NB_MODULE(project_damage_core_py, mod)
 	                   
 	                                                                        
 	                                                                          
+    nb::class_<PaintedThroughHole>(mod, "PaintedThroughHole")
+        .def(nb::init<>())
+        .def_rw("effect", &PaintedThroughHole::effect)
+        .def_rw("near_min", &PaintedThroughHole::nearMin)
+        .def_rw("near_max", &PaintedThroughHole::nearMax)
+        .def_rw("outline", &PaintedThroughHole::outline)
+        .def_rw("to_plane", &PaintedThroughHole::toPlane)
+        .def_rw("to_source", &PaintedThroughHole::toSource);
 	nb::class_<ProjectDamageParams>(mod, "Params")
 		.def(nb::init<>())
         .def_rw("profile_core", &ProjectDamageParams::profileCore)
         .def_rw("incremental_keys", &ProjectDamageParams::incrementalKeys)
+        .def_rw("through_holes", &ProjectDamageParams::throughHoles)
         .def_rw("fracture_layers", &ProjectDamageParams::fractureLayers)
+        .def_rw("wall_layers", &ProjectDamageParams::wallLayers)
+        .def_rw("boolean_layers", &ProjectDamageParams::booleanLayers)
+        .def_rw("boolean_tube_fill", &ProjectDamageParams::booleanTubeFill)
+        .def_rw("wall_stroke_points", &ProjectDamageParams::wallStrokePoints)
+        .def_rw("wall_stroke_counts", &ProjectDamageParams::wallStrokeCounts)
+        .def_rw("wall_instance", &ProjectDamageParams::wallInstance)
         .def_rw("fracture_guide_points", &ProjectDamageParams::fractureGuidePoints)
         .def_rw("fracture_guide_counts", &ProjectDamageParams::fractureGuideCounts)
         .def_rw("fracture_guide_levels", &ProjectDamageParams::fractureGuideLevels)
@@ -5041,7 +5110,8 @@ NB_MODULE(project_damage_core_py, mod)
 		.def_rw("detail", &WeldParams::detail)
 		.def_rw("uv_scale", &WeldParams::uvScale);
 	mod.def("build_welds", &BuildWeldsPy, nb::arg("points"), nb::arg("polys"), nb::arg("weights"), nb::arg("strokes"), nb::arg("params"), nb::arg("surface_guide") = false,
-		"Weld beads along the masked corner edges and the drawn strokes.");
+		nb::arg("edge_selection") = nb::none(), nb::arg("edge_exclusion") = nb::none(),
+		"Weld beads along explicit mesh edges or masked corners, and along drawn strokes.");
 	nb::class_<GrassParams>(mod, "GrassParams").def(nb::init<>())
 		.def_rw("seed", &GrassParams::seed)
 		.def_rw("fresh", &GrassParams::fresh)
