@@ -94,11 +94,13 @@ def commit_boolean_fragments(context,pieces,existing,backup,saved_result):
 def reuse_outputs(context, source, stage_uid, result, final, old_outputs, frozen, frozen_roles, flags, replaced_meshes):
     available = [obj for obj in old_outputs if obj != result]
     uid = source['project_damage_uid']
+    from .wall_stack import INSTANCE
     frozen_set = set(frozen)
     adopted = {}
     for obj in frozen + [obj for obj in owned(stage_uid) if obj != final]:
         roles = frozen_roles.get(obj) or tuple(stamp for stamp in ownership.STAMPS if obj.get(stamp) == stage_uid)
         target = next((old for old in available if old.type == obj.type == 'MESH'
+                       and old.get(INSTANCE, 0) == obj.get(INSTANCE, 0)
                        and tuple(stamp for stamp in ownership.STAMPS if old.get(stamp) == uid) == roles), None)
         if target is None:continue
         available.remove(target)
@@ -139,15 +141,23 @@ def reuse_outputs(context, source, stage_uid, result, final, old_outputs, frozen
     return updated_frozen, available
 
 
-def apply(context, source, key):
-    from . import damage_generator_assets
+def apply(context, source, key, instance=0):
+    from . import boolean_stack, damage_generator_assets, wall_stack
     if key in damage_generator_assets.KINDS:return damage_generator_assets.bake_selected(context,source,key)
     from . import sidebar
     result = build.result_of(source)
-    if key not in sidebar.CATALOG or not sidebar.enabled(source, key) or source.project_damage.all_off:
+    stacked_boolean = boolean_stack.SERIAL in source
+    index = boolean_stack.chosen_index(source, instance) if key == 'boolean' and stacked_boolean else wall_stack.chosen_index(source, key, instance)
+    row = source.project_damage_effects[index] if index is not None else None
+    if key not in sidebar.CATALOG or not sidebar.enabled(source, key, row) or source.project_damage.all_off:
         raise RuntimeError('Choose an enabled effect first')
     if key in {'rbf', 'cellf', 'debris'}:
         raise RuntimeError('Fragment/debris outputs depend on the full stack; use Apply All for these generators')
+    if key == 'boolean' and stacked_boolean and any(item != row and item.get(boolean_stack.ON)
+                                                    for item in boolean_stack.rows(source)):
+        from . import boolean_break
+        if boolean_break.fragments_of(source):
+            raise RuntimeError('Use Apply All to bake the fragments from multiple Boolean Breaks')
     if key == 'hang' and source.project_damage.hang_mode == '1':
         raise RuntimeError('Rebar Holes using Boolean breakers depends on Boolean Break; use Apply All')
     if source.library or result is None or result.library:
@@ -175,6 +185,8 @@ def apply(context, source, key):
         from . import fracture_stack
         fracture_stack.ensure(source)
         fracture_stack.save(source)
+        wall_stack.save(source)
+        boolean_stack.save(source)
         stage = source.copy()
         stage.data = source.data.copy()
         context.scene.collection.objects.link(stage)
@@ -199,6 +211,18 @@ def apply(context, source, key):
             if r.key in fracture_stack.FRACTURE_KEYS:r[fracture_stack.ON]=bool(r.key==key and fracture_flags[r.key])
         fracture_stack.flags(stage)
         if key in fracture_stack.FRACTURE_KEYS:fracture_stack.select(stage,key)
+        wall_flags = {r[wall_stack.INSTANCE]: bool(r.get(wall_stack.ON)) for r in wall_stack.rows(stage)}
+        for item in wall_stack.rows(stage):
+            item[wall_stack.ON] = key in wall_stack.KEYS and item[wall_stack.INSTANCE] == instance and wall_flags[instance]
+        boolean_flags = {item[boolean_stack.INSTANCE]: bool(item.get(boolean_stack.ON)) for item in boolean_stack.rows(stage)}
+        if stacked_boolean:
+            stage[boolean_stack.EDIT] = 0
+            for item in boolean_stack.rows(stage):
+                serial = item[boolean_stack.INSTANCE]
+                item[boolean_stack.ON] = key == 'boolean' and serial == instance and boolean_flags[serial]
+            if key == 'boolean':
+                boolean_stack.select(stage, boolean_stack.by_id(stage, instance))
+            boolean_stack.refresh_master(stage)
         first, reports = build.rebuild_object(context, stage)
         if first is None:
             raise RuntimeError('Selected effect failed: ' + '; '.join(str(r[1]) for r in reports))
@@ -230,6 +254,15 @@ def apply(context, source, key):
         for r in stage.project_damage_effects:
             if r.key in fracture_flags:r[fracture_stack.ON]=fracture_flags[r.key] and r.key!=key
         fracture_stack.flags(stage)
+        for item in wall_stack.rows(stage):
+            serial = item[wall_stack.INSTANCE]
+            item[wall_stack.ON] = wall_flags[serial] and (key not in wall_stack.KEYS or serial != instance)
+        if stacked_boolean:
+            stage[boolean_stack.EDIT] = 0
+            for item in boolean_stack.rows(stage):
+                serial = item[boolean_stack.INSTANCE]
+                item[boolean_stack.ON] = boolean_flags[serial] and (key != 'boolean' or serial != instance)
+            boolean_stack.refresh_master(stage)
         if key == 'buildup':
             stage.project_damage.deposit_enable = False
         if key == 'boolean':
@@ -295,9 +328,14 @@ def apply(context, source, key):
             setattr(source.project_damage, name, False)
         if key in fracture_stack.FRACTURE_KEYS:
             fracture_stack.set_enabled(source,key,False)
-        for i in reversed(range(len(source.project_damage_effects))):
-            if source.project_damage_effects[i].key == key:
-                source.project_damage_effects.remove(i)
+        if key == 'boolean' and stacked_boolean:
+            boolean_stack.remove(source, index)
+        elif instance:
+            wall_stack.remove(source, index)
+        else:
+            for i in reversed(range(len(source.project_damage_effects))):
+                if source.project_damage_effects[i].key == key:
+                    source.project_damage_effects.remove(i)
         source.project_damage_effect_index = min(source.project_damage_effect_index, max(0, len(source.project_damage_effects)-1))
         if not keep_states:
             frozen, stale_outputs = reuse_outputs(context, source, stage_uid, result, final,
@@ -378,6 +416,7 @@ class PROJECT_DAMAGE_OT_apply_selected(bpy.types.Operator):
     bl_description = 'Bake only this effect into the source, remove it from the live list and recompute the others. Hidden intermediate copies are kept only with Save All Mesh States in Preferences'
     bl_options = {'REGISTER', 'UNDO'}
     effect: bpy.props.StringProperty()
+    instance: bpy.props.IntProperty(options={'HIDDEN', 'SKIP_SAVE'})
 
     @classmethod
     def poll(cls, context):
@@ -412,7 +451,14 @@ class PROJECT_DAMAGE_OT_apply_selected(bpy.types.Operator):
                 self.report({'ERROR'},str(exc));return {'CANCELLED'}
             return {'FINISHED'}
         try:
-            apply(context, source, key)
+            from . import boolean_stack, wall_stack
+            if key == 'boolean' and boolean_stack.SERIAL in source:
+                index = boolean_stack.chosen_index(source, self.instance)
+                instance = rows[index].get(boolean_stack.INSTANCE, 0) if index is not None else 0
+            else:
+                index = wall_stack.chosen_index(source, key, self.instance)
+                instance = rows[index].get(wall_stack.INSTANCE, 0) if index is not None else 0
+            apply(context, source, key, instance)
         except Exception as exc:
             self.report({'ERROR'}, 'Apply Selected: ' + str(exc))
             return {'CANCELLED'}

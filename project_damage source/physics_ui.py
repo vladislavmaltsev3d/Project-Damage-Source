@@ -12,7 +12,7 @@ from . import damage_physics as dp, ui_image_hints as hints
 
 SECTIONS = (
     ('fill','Fill Damage',True), ('separate','Separate Pieces',False),
-    ('fracture','Create Fracture Pieces',True), ('drawing','Drawing / Guidance',False),
+    ('fracture','Create Fracture Pieces',True), ('drawing','Cuts & Guidance',False),
     ('finish','Noisify Shards',False), ('simulation','Rigid Body Simulation',False),
 )
 
@@ -52,7 +52,7 @@ def draw(layout,p,context,module):
     source=dp.ownership.context_source(context)
     if source is None or not hasattr(source,'project_damage_physics') or not dp.module_enabled(p,module):return
     if module=='concrete' and not (p.concrete_enable or p.concrete_v2_enable or p.pipe_damage_enable or p.cable_damage_enable):return
-    from . import physics_workflow,boolean_break,material_controls,cell_cuts,inner_rough
+    from . import physics_workflow,boolean_break,material_controls,cell_cuts,inner_rough,uv_zones
     s=dp.settings(source)
     root=layout.column(align=False);root.use_property_split=False;root.use_property_decorate=False
     guide=root.box()
@@ -71,7 +71,7 @@ def draw(layout,p,context,module):
     piece_count = len(dp.pieces_of(source))
     guide.label(text='%d fills  |  %d fracture pieces'%(count,piece_count))
 
-                                                                    
+
     col=section(root,context,'fill','Prepare: Fill Damage' if module not in dp.ADDITIVE else 'Prepare: Detach Geometry','MOD_SOLIDIFY','physics_fill_method' if module not in dp.ADDITIVE else None)
     if col is not None:
         if module in dp.ADDITIVE:
@@ -108,7 +108,7 @@ def draw(layout,p,context,module):
                 box=col.box();box.prop(s,'hit_fill_shards');box.prop(s,'hit_fill_center')
                 box.operator('project_damage.physics_fill_hole',text='Fill Crater with Shards',icon='MOD_PARTICLES')
 
-                                                                    
+
     if module in {'boolean','hit'}:
         col=section(root,context,'separate','Separate Pieces','MOD_EXPLODE','physics_separate')
         if col is not None:
@@ -121,7 +121,7 @@ def draw(layout,p,context,module):
                         col.prop(p,'hit_through_gap',text='Piece Gap');col.prop(p,'hit_through_remove',text='Remove Chunks');col.prop(p,'hit_through_min_piece',text='Min Piece')
                 if p.hit_through_enable or s.hit_separate:col.operator('project_damage.physics_separate',icon='MOD_EXPLODE')
 
-                                                                            
+
     col=section(root,context,'fracture','Fracture: Create Pieces','MOD_EXPLODE','physics_fracture')
     if col is not None:
         targets=dp.fracture_targets(context,source,module)
@@ -140,19 +140,16 @@ def draw(layout,p,context,module):
         if module=='hit':box.prop(s,'hit_fill_shards',text='Pieces');box.prop(s,'hit_fill_center')
         else:box.prop(s,'bullet_piece_size' if module=='bullet' else 'piece_size',text='Piece Size (cm)')
         box.prop(s,'amount_budget',text='Maximum Pieces');box.prop(s,'seed');box.prop(s,'hide_fill',text='Hide Input after Fracture')
-        drawing=section(col,context,'drawing','Drawing / Guidance','GREASEPENCIL','physics_drawing')
+        drawing=section(col,context,'drawing','Cuts & Guidance','GREASEPENCIL','physics_drawing')
         if drawing is not None:
             row=drawing.row(align=True);row.scale_y=1.5
-            row.prop_enum(s,'cut_mode','AUTO',text='Automatic + Drawing');row.prop_enum(s,'cut_mode','DRAWN',text='Drawing Only')
-            cell_cuts.draw_layers(drawing,context,source)
+            row.prop_enum(s,'cut_mode','AUTO');row.prop_enum(s,'cut_mode','DRAWN')
+            cell_cuts.draw_layers(drawing,context,source,physics=True)
         col.separator()
         col.label(text='Ready? Apply the settings with Fracture.',icon='INFO')
         from .material_library import draw_property
         draw_property(col, s, 'inner_material', text='Inside Faces')
-        row = col.row(align=True)
-        row.enabled = bool(piece_count)
-        row.operator('project_damage.unwrap_zones', text='Quick UV Map', icon='UV').fracture_inside = True
-        row.operator('project_damage.edit_zone_uv', text='Edit Scale', icon='FULLSCREEN_ENTER').fracture_inside = True
+        uv_zones.draw_inside_uv(col, context)
         row=col.row(align=True);row.scale_y=1.7
         row.operator('project_damage.physics_fracture',text='Fracture Selected Fragments' if fragments else 'Fracture Fills',icon='MOD_EXPLODE').module=module
         physics_workflow.remove_button(row,source,'PIECES',module)

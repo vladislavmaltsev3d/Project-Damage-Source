@@ -153,15 +153,23 @@ def settings_changed(self,context):
                                                                                
 _outputs={}
 
-def clear_outputs():_outputs.clear();_bodies.clear();_slots.clear()
+def clear_outputs():
+    from . import boolean_break
+    _outputs.clear();_bodies.clear();_slots.clear()
+    boolean_break.clear_split_plans()
 
-def mesh_state(mesh,appearance=True,materials=True):
-    # appearance=False: shape only. Material slots, face material indices and UV maps
-    # are left out, so a material swap or Quick UV on an output is not a new shape.
+def geometry_arrays(mesh):
     co=np.empty(len(mesh.vertices)*3,np.float32);mesh.vertices.foreach_get('co',co)
     edges=np.empty(len(mesh.edges)*2,np.int32);mesh.edges.foreach_get('vertices',edges)
     vi=np.empty(len(mesh.loops),np.int32);mesh.loops.foreach_get('vertex_index',vi)
     counts=np.empty(len(mesh.polygons),np.int32);mesh.polygons.foreach_get('loop_total',counts)
+    return co, edges, vi, counts
+
+
+def mesh_state(mesh,appearance=True,materials=True):
+    # appearance=False: shape only. Material slots, face material indices and UV maps
+    # are left out, so a material swap or Quick UV on an output is not a new shape.
+    co, edges, vi, counts = geometry_arrays(mesh)
     mats=np.empty(len(mesh.polygons),np.int32);mesh.polygons.foreach_get('material_index',mats)
     attrs={}
     for attr in mesh.attributes:
@@ -305,6 +313,9 @@ def body_key(context,source):
     settings['effective_rebar_resolutions']=[preview_quality.rebar_resolution(p,name) for name in ('rebar_resolution','concrete_rebar_resolution','hang_rebar_resolution','surface_rebar_resolution')]
     settings['fracture_stack']=[(key,{name:_state(context,source,value) for name,value in values.items()})
                                for key,values in fracture_stack.state(source)]
+    from . import wall_stack
+    if wall_stack.SERIAL in source:
+        settings['wall_layers'] = wall_stack.fingerprint(context, source)
     # The link records the object, but Break Surface settings live on the cutter.
     breaker_settings = [_state(context, source, row.obj.project_damage_breaker)
                         if row.obj is not None else None for row in p.breakers]

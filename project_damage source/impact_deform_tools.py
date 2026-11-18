@@ -36,7 +36,7 @@ ORIGIN_INDEX = {'AUTO': 0, 'EMPTY': 1, 'OBJECT': 2}
 def core_supports_new():
     """The loaded native core knows Smoothness / Noise Scale / own origins."""
     from . import core_loader
-    core = sys.modules.get(core_loader.MODULE_NAME)
+    core = core_loader.loaded()
     if core is None:
         return True                                          
     try:

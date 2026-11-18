@@ -72,10 +72,15 @@ _DRAW_ERROR_SHOWN = False
 
 def _draw():
     global _SHADER, _DRAW_ERROR_SHOWN
-    from . import live
+    from . import gpu_ui, live
     if live._HISTORY_RESTORING:
         return
     context = bpy.context
+    if context.area is None or not gpu_ui.sidebar_visible(context.area):
+        return
+    breakers = live._scan().breakers
+    if not breakers:
+        return
     factor = params.unit_factor(context)
     if _SHADER is None:
         _SHADER = gpu.shader.from_builtin('UNIFORM_COLOR')
@@ -83,8 +88,8 @@ def _draw():
     gpu.state.blend_set('ALPHA')
     gpu.state.line_width_set(2.0)
     try:
-        for obj in context.scene.objects:
-            if obj.type != 'EMPTY' or not obj.project_damage_breaker.is_breaker:
+        for obj in breakers:
+            if obj.type != 'EMPTY' or obj.name not in context.view_layer.objects:
                 continue
             if not obj.visible_get():
                 continue

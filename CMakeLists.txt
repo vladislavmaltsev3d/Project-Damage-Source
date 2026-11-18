@@ -1,6 +1,6 @@
 # build the published sources without machine-specific folders
 cmake_minimum_required(VERSION 3.24)
-project(ProjectDamageSource VERSION 0.15.49 LANGUAGES CXX)
+project(ProjectDamageSource VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -46,7 +46,7 @@ add_subdirectory("${PD_VENDOR_manifold}" "vendor-build/manifold" EXCLUDE_FROM_AL
 find_package(Python 3.11 REQUIRED COMPONENTS Interpreter Development.Module)
 add_subdirectory("${PD_VENDOR_nanobind}" "vendor-build/nanobind" EXCLUDE_FROM_ALL)
 
-set(PD_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/project_damage/core/source")
+set(PD_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/project_damage source/core/source")
 add_library(project_damage_core STATIC
     "${PD_SOURCE}/source/peeling.cpp"
     "${PD_SOURCE}/source/damage_shading.cpp"
@@ -119,7 +119,7 @@ target_link_libraries(project_damage_core PUBLIC manifold Clipper2 TBB::tbb TBB:
 
 nanobind_add_module(project_damage_core_py NB_STATIC
     "${PD_SOURCE}/core_standalone/project_damage_core_py.cpp")
-target_compile_definitions(project_damage_core_py PRIVATE PROJECT_DAMAGE_CORE_VERSION="0.15.49")
+target_compile_definitions(project_damage_core_py PRIVATE PROJECT_DAMAGE_CORE_VERSION="1.0.0")
 target_link_libraries(project_damage_core_py PRIVATE project_damage_core)
 
 nanobind_add_module(project_damage_peeling NB_STATIC

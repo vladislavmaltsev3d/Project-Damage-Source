@@ -6,9 +6,9 @@ import bpy
 from . import ownership
 import numpy as np
 
-def concrete_draw_paths(context, source, points, polys, factor):
+def concrete_draw_paths(context, source, points, polys, factor, *, props=None):
     from . import paint
-    props = source.project_damage
+    props = source.project_damage if props is None else props
     drawing = props.concrete_drawing
     paths = [np.ascontiguousarray(path * factor, dtype=np.float64)
              for path in paint.read_paths(context, source, drawing)]

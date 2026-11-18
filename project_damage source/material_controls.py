@@ -97,6 +97,7 @@ EXTRA_PROPS['surface_rebar_material']='Surface Reinforcement'
 
 EXTRA_PROPS['pile_material']='Corner Piles'
 EXTRA_PROPS['concrete_rebar_material']='Concrete Reinforcement'
+EXTRA_PROPS['rebar_drawn_material']='Hand-Drawn Rebar Material'
 EFFECT_SLOTS['cellf']=()
 
 def register_properties(cls, update):
@@ -115,10 +116,15 @@ def register_properties(cls, update):
 
 def overrides(source, existing=None):
     result = dict(existing or {})
-    from . import fracture_stack
-    canonical=next(iter(fracture_stack.layers(source)),('',source.project_damage))[1]
+    from . import fracture_stack, wall_stack
+    fractures = fracture_stack.layers(source)
+    canonical = fractures[0][1] if fractures else source.project_damage
+    editing_wall = wall_stack.edited(source) is not None
     for cls, name in CLASS_PROPS.items():
-        mat = getattr(canonical if cls in (1,2,3) else source.project_damage, name)
+        if editing_wall and name in wall_stack.MATERIALS and (cls == 4 or not fractures):
+            mat = source.get(wall_stack.BASE_MATERIALS, {}).get(name)
+        else:
+            mat = getattr(canonical if cls in (1,2,3) else source.project_damage, name)
         if mat is not None:
             result[cls] = mat
                                                                             
@@ -171,6 +177,8 @@ def draw(layout, props, module):
     if module=='boolean' and props.rebar_enable:
         name={'0':'rebar_material','1':'rebar_brick_material','2':'rebar_plank_material','3':'rebar_framing_material','4':'rebar_chips_material','5':'rebar_plank_material'}[props.rebar_fill]
         draw_property(box,props,name)
+        if props.rebar_fill=='0' and not props.boolean_central_rebar and props.rebar_drawing is not None:
+            draw_property(box,props,'rebar_drawn_material')
         if props.rebar_fill=='3':draw_property(box,props,'rebar_nail_material')
         if props.rebar_fill=='1' and not props.rebar_brick_3d:draw_property(box,props,'rebar_mortar_material')
     return
@@ -335,19 +343,53 @@ class PROJECT_DAMAGE_OT_material_all(bpy.types.Operator):
         return {'FINISHED'}
 
 
+TUBE_MATERIAL_FIELDS = ('pipe_material', 'cable_material')
+
+
+def automatic_material_keys(field):
+    marker = '_pd_auto_' + field
+    return marker, marker + '_type'
+
+
+def restore_automatic_material(props, field, values):
+    for key in automatic_material_keys(field):
+        if key in values:
+            props[key] = values[key]
+        elif key in props:
+            del props[key]
+
+
+def _automatic_material_changed(props, field, material, kind):
+    name_key, type_key = automatic_material_keys(field)
+    return props.get(name_key) == material.name and props.get(type_key) != kind
+
+
+def _set_automatic_material(props, field, material, kind):
+    setattr(props, field, material)
+    name_key, type_key = automatic_material_keys(field)
+    props[name_key] = material.name
+    props[type_key] = kind
+
+
 def remember_defaults(source, result):
     """Keep the selectors in sync with actually generated default materials."""
     import numpy as np
-    from . import live, mesh_io, result_transfer, material_update, ownership, material_uv
+    from . import boolean_stack, live, mesh_io, result_transfer, material_update, material_uv, wall_stack
     previous=live._APPLYING;live._APPLYING=True
     p=source.project_damage
-    def assign(field,material):
-        if material is not None and hasattr(p,field) and getattr(p,field) is None:
-            base=material_uv.base_material(material)
-            setattr(p,field,base)
-            if field in {'pipe_material','cable_material'}:
-                p['_pd_auto_'+field]=base.name
-                p['_pd_auto_'+field+'_type']=getattr(p,field.replace('_material','_type'))
+
+    def assign(field, material):
+        if material is None:
+            return
+        current = getattr(p, field)
+        base = material_uv.base_material(material)
+        if field in TUBE_MATERIAL_FIELDS:
+            kind = getattr(p, field.replace('_material', '_type'))
+            if current is None or _automatic_material_changed(p, field, current, kind):
+                _set_automatic_material(p, field, base, kind)
+        elif current is None:
+            setattr(p, field, base)
+
     try:
         mesh=result.data
         indices=np.empty(len(mesh.polygons),dtype=np.int32);mesh.polygons.foreach_get('material_index',indices)
@@ -355,36 +397,50 @@ def remember_defaults(source, result):
         for _,attr,_ in result_transfer.MATERIAL_REGIONS:
             mask=material_update.face_values(mesh,attr)
             if mask is not None:dedicated|=mask.astype(bool)
-        def region(attr,shared=False):
+        boolean = boolean_stack.edited(source)
+        wall = wall_stack.edited(source)
+        scope = {}
+        if boolean_stack.SERIAL in source:
+            owners = material_update.face_values(mesh, boolean_stack.FACE_OWNER)
+            serial = boolean[boolean_stack.INSTANCE] if boolean is not None else 0
+            scope['boolean_break_material'] = owners == serial if owners is not None else np.full(len(indices), serial == 0)
+        if wall_stack.SERIAL in source:
+            owners = material_update.face_values(mesh, 'project_damage_wall_instance')
+            serial = wall[wall_stack.INSTANCE] if wall is not None else 0
+            mask = owners == serial if owners is not None else np.full(len(indices), serial == 0)
+            scope.update(dict.fromkeys(wall_stack.MATERIALS, mask))
+
+        def region(attr, shared=False, owner_mask=None):
             attribute=mesh.attributes.get(attr)
             if attribute is None or attribute.domain!='FACE' or len(attribute.data)!=len(indices):return None
             mask=np.empty(len(indices),dtype=np.bool_);attribute.data.foreach_get('value',mask)
             if shared:mask&=~dedicated
+            if owner_mask is not None:mask&=owner_mask
             valid=indices[mask]
             if not len(valid):return None
             counts=np.bincount(valid);slot=int(counts.argmax())
             return mesh.materials[slot] if slot<len(mesh.materials) else None
-        for cls,field in CLASS_PROPS.items():assign(field,region(mesh_io.CLASS_NAMES[cls],shared=True))
+        for cls,field in CLASS_PROPS.items():
+            assign(field,region(mesh_io.CLASS_NAMES[cls],shared=True,owner_mask=scope.get(field)))
         for _,attr,field in result_transfer.MATERIAL_REGIONS:assign(field,region(attr))
-        uid=source.get('project_damage_uid')
-        objects=[ob for ob in bpy.data.objects if ob.type=='MESH' and any(ob.get(stamp)==uid for stamp in ownership.STAMPS)] if uid else []
         mapping=dict(material_update.OUTPUTS)
         if p.rebar_enable:mapping[material_update.REBAR_FIELDS.get(p.rebar_fill,'rebar_material')]=('rebar',0)
         for field,(kind,slot) in mapping.items():
-            for ob in objects:
-                if ob.get('project_damage_'+kind+'_of')==uid and slot<len(ob.data.materials):assign(field,ob.data.materials[slot]);break
+            obj = material_update.output_object(source, kind, field)
+            if obj is not None and slot < len(obj.data.materials):
+                assign(field, obj.data.materials[slot])
     finally:live._APPLYING=previous
 
 
 def automatic_default(props,field,kind,factory):
     from . import live
     material=getattr(props,field)
-    marker='_pd_auto_'+field
-    if material is not None and not (props.get(marker)==material.name and props.get(marker+'_type')!=kind):return material
+    if material is not None and not _automatic_material_changed(props, field, material, kind):
+        return material
     material=factory(kind)
-    if material is not None:
+    if material is not None and isinstance(props, bpy.types.PropertyGroup):
         previous=live._APPLYING;live._APPLYING=True
         try:
-            setattr(props,field,material);props[marker]=material.name;props[marker+'_type']=kind
+            _set_automatic_material(props, field, material, kind)
         finally:live._APPLYING=previous
     return material

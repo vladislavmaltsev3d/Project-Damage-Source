@@ -44,24 +44,43 @@ def used_slots(obj):
     if len(_COUNTS)>64:_COUNTS.popitem(last=False)
     return slots
 
-_FRAGMENT_STAMPS=('project_damage_cellf_of','project_damage_rbf_of','project_damage_debris_of','project_damage_fill_piece_of','project_damage_split_piece_of','project_damage_fragment_of')
+_FRAGMENT_STAMPS=('project_damage_cellf_of','project_damage_rbf_of','project_damage_debris_of','project_damage_fill_piece_of','project_damage_split_piece_of','project_damage_fragment_of','project_damage_bfrag_of')
 _GROUPS=OrderedDict()
 
 def inner_mask(obj):
+    from .material_update import face_values
+
     mesh=obj.data
+    mask = np.zeros(len(mesh.polygons), bool)
     for name,kind in (('project_damage_physics_inner','BOOL'),('_pd_fill_outer','ZERO'),('project_damage_debris_base_poly','NEGATIVE'),('project_damage_base_poly','NEGATIVE')):
-        attr=mesh.attributes.get(name)
-        if attr is None or attr.domain!='FACE' or attr.data_type not in {'BOOLEAN','INT'}:continue
-        values=np.empty(len(mesh.polygons),np.int32);attr.data.foreach_get('value',values)
-        return values.astype(bool) if kind=='BOOL' else values==0 if kind=='ZERO' else values<0
-    return np.zeros(len(mesh.polygons),bool)
+        values = face_values(mesh, name)
+        if values is not None:
+            mask = values.astype(bool) if kind=='BOOL' else values==0 if kind=='ZERO' else values<0
+            break
+    if not mask.any() and (obj.get('project_damage_bfrag_of') or obj.get('project_damage_fragment_of')
+                           or obj.get('project_damage_baked_fragment')
+                           or obj.get('project_damage_baked_effect') == 'boolean'):
+        # Boolean separation can have cut-face effect IDs without Fracture Fills provenance.
+        from . import effect_groups
+        values = face_values(mesh, effect_groups.ATTRIBUTE)
+        if values is not None:
+            mask = values == effect_groups.KEYS.index('boolean')
+        if not mask.any():
+            name = mesh.get(effect_groups.OWNED_FACES, {}).get('boolean')
+            values = face_values(mesh, name) if name else None
+            if values is not None:
+                mask = values.astype(bool)
+    return mask
 
 def fragment(obj):
     if not is_applied(obj):return False
     if 'project_damage_baked_fragment' in obj:return bool(obj['project_damage_baked_fragment'])
-    return not obj.get('project_damage_baked_surface') and any(obj.data.attributes.get(n) is not None for n in ('project_damage_physics_inner','project_damage_debris_base_poly','_pd_fill_outer'))
+    return not obj.get('project_damage_baked_surface') and (
+        any(obj.data.attributes.get(n) is not None for n in
+            ('project_damage_physics_inner','project_damage_debris_base_poly','_pd_fill_outer'))
+        or (obj.get('project_damage_baked_effect') == 'boolean' and inner_mask(obj).any()))
 
-def batch_objects(context,obj,fresh=False):
+def batch_objects(context,obj,fresh=False,*,scene_wide=False):
     if obj is None or not is_applied(obj):return []
     batch=obj.get('project_damage_applied_batch');source=obj.get('project_damage_baked_backup')
     token=('BATCH',batch) if batch else ('SOURCE',source.session_uid) if isinstance(source,bpy.types.Object) else ('OBJECT',obj.session_uid)
@@ -73,12 +92,13 @@ def batch_objects(context,obj,fresh=False):
             if (batch and other.get('project_damage_applied_batch')==batch) or (not batch and source is not None and other.get('project_damage_baked_backup')==source) or other==obj:found.append(other)
         _GROUPS[key]=tuple(found)
         if len(_GROUPS)>32:_GROUPS.popitem(last=False)
-    try:return [o for o in _GROUPS[key] if is_applied(o) and o.name in context.view_layer.objects]
+    layer = context.scene.objects if scene_wide else context.view_layer.objects
+    try:return [o for o in _GROUPS[key] if is_applied(o) and o.name in layer]
     except ReferenceError:
-        _GROUPS.pop(key,None);return batch_objects(context,obj,True)
+        _GROUPS.pop(key,None);return batch_objects(context,obj,True,scene_wide=scene_wide)
 
-def fracture_objects(context,obj,fresh=False):
-    return [other for other in batch_objects(context,obj,fresh) if fragment(other)]
+def fracture_objects(context,obj,fresh=False,*,scene_wide=False):
+    return [other for other in batch_objects(context,obj,fresh,scene_wide=scene_wide) if fragment(other)]
 
 def split_walls(objects):
     walls = [obj for obj in objects if obj.get('project_damage_baked_split_wall')]
@@ -157,13 +177,13 @@ def draw(layout,context,obj):
     row.context_pointer_set('project_damage_import_source',obj)
     row.operator('project_damage.update',text='Add Project Damage',icon='ADD').target_name=obj.name
     layout.label(text='Start new effects on this applied mesh.',icon='INFO')
-    fragments=fracture_objects(context,obj)
+    fragments=fracture_objects(context,obj,scene_wide=True)
     if fragments:
         batch=layout.box()
         material_controls.centered_heading(batch,'All Fracture Objects (%d)'%len(fragments),icon='MOD_EXPLODE')
         material_library.draw_property(batch,obj.project_damage,'baked_sides_material',text='Sides Material')
         batch.operator('project_damage.baked_sides_material',text='Apply Sides Material to All',icon='MATERIAL')
-        batch.operator('project_damage.unwrap_zones',text='Quick UV Map — All Fracture Objects',icon='UV').all_fragments=True
+        uv_zones.draw_inside_uv(batch,context,text='Quick UV Map - All Fracture Objects',has_pieces=True)
     box=layout.box()
     material_controls.centered_heading(box,'Materials',icon='MATERIAL')
     slots=used_slots(obj)

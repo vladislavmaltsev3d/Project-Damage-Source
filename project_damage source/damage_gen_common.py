@@ -582,7 +582,9 @@ def math_node(nodes, links, op, a, b=None, x=-200, y=0):
 
 def _kind_items(self, context):
     from .damage_generator_assets import RETIRED_KINDS
-    return [(k.key, k.label, k.description, k.icon, i) for i, k in enumerate(KINDS.values()) if k.key not in RETIRED_KINDS]
+    return [(k.key, k.label, k.description, k.icon, i)
+            for i, k in enumerate(KINDS.values())
+            if k.key not in RETIRED_KINDS and k.key != 'METAL']
 
 
 def _select_only(context, obj):
@@ -763,11 +765,10 @@ def draw_settings(layout, context, g):
     if g is None:return
     kind = kind_of(g)
     s = settings_of(g)
-    from . import material_controls
+    from . import effect_layout, material_controls
     material_controls.centered_heading(layout, kind.label, icon=kind.icon)
+    effect_layout.standalone_update(layout, s, 'project_damage.gen_build')
     row = layout.row(align=True)
-    row.operator('project_damage.gen_build', text='Update', icon='FILE_REFRESH')
-    row.prop(s, 'live_update', text='', icon='FILE_REFRESH')
     row.operator('project_damage.gen_seed', text='', icon='SHADERFX')
     row.operator('project_damage.gen_apply', text='Apply', icon='CHECKMARK')
     if s.report:layout.label(text=s.report)

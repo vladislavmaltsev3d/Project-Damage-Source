@@ -14,6 +14,7 @@ import pickle
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import traceback
@@ -66,7 +67,7 @@ def interacting(scene):
     if bpy.app.background:return False
     for win in bpy.context.window_manager.windows:
         if win.scene!=scene:continue
-                                                                          
+
         for op in getattr(win,'modal_operators',()):
             name=op.bl_idname
             if name.startswith(('TRANSFORM_OT_','transform.')) or name in {'VIEW3D_OT_rotate','VIEW3D_OT_move','VIEW3D_OT_zoom','view3d.rotate','view3d.move','view3d.zoom'}:
@@ -92,9 +93,19 @@ def async_for(source):
     return enabled(source) and not _sync_depth
 
 def _redraw():
+    from . import viewport_helpers
+    viewport_helpers.wake()
     for window in bpy.context.window_manager.windows:
         for area in window.screen.areas:
             if area.type == 'VIEW_3D': area.tag_redraw()
+
+
+def _panel_visible():
+    from . import gpu_ui
+    wm=bpy.context.window_manager
+    return not bpy.app.background and wm is not None and any(
+        gpu_ui.sidebar_visible(area) for window in wm.windows for area in window.screen.areas)
+
 
 class Request:
     def __init__(self, label, func, args, kw, native=None):
@@ -189,7 +200,7 @@ def _budget_tick():
         proc=j.get('process')
         if not proc or proc.poll() is not None:continue
         if os.name=='posix':
-                                                                          
+
             paused=budget<100 and (time.monotonic()-j.get('cpu_epoch',0.))%.2 >= .2*budget/100.
             if paused!=j.get('cpu_paused',False):
                 try:os.kill(proc.pid,signal.SIGSTOP if paused else signal.SIGCONT);j['cpu_paused']=paused
@@ -228,7 +239,7 @@ def _start_worker(j):
     from . import incremental
     if _idle_worker is not None:
         previous=_idle_worker;_idle_worker=None
-        if incremental.cache_enabled() and j['key'][1]!='python_operation' and previous['process'].poll() is None:
+        if incremental.cache_enabled() and j['key'][1] not in {'python_operation', 'physics_preview'} and previous['process'].poll() is None:
             for name in ('process','folder','cpu_job','cpu_budget'):
                 if name in previous:j[name]=previous[name]
             j['cpu_epoch']=time.monotonic()
@@ -238,6 +249,12 @@ def _start_worker(j):
     folder=Path(tempfile.mkdtemp(prefix='project_damage_job_'));j['folder']=folder
     env=dict(os.environ,PD_PRIVATE_WORKER='1',OMP_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',
              VECLIB_MAXIMUM_THREADS='1',MKL_NUM_THREADS='1',NUMEXPR_NUM_THREADS='1',BLIS_NUM_THREADS='1')
+    # The worker starts with factory preferences, which omit custom repositories.
+    env['PD_WORKER_PACKAGE'] = __package__
+    from . import core_loader
+    loaded_core = core_loader.loaded()
+    if loaded_core is not None:
+        env['PROJECT_DAMAGE_CORE_PY_DIR'] = str(Path(loaded_core.__file__).resolve().parent)
     cmd=[bpy.app.binary_path,'--background','--factory-startup','--disable-autoexec','-t','1',
          '--python-exit-code','7','--python',str(Path(__file__).with_name('background_worker.py')),'--',str(folder),str(os.getpid())]
     if os.name=='posix' and Path('/usr/bin/nice').exists(): cmd=['/usr/bin/nice','-n','12',*cmd]
@@ -278,7 +295,7 @@ def _idle_check():
     j=_idle_worker
     if j is None:return None
     proc=j.get('process')
-    if proc is not None and proc.poll() is None and time.monotonic()-j.get('idle_since',0.)<IDLE_WORKER_SECONDS:return 5.
+    if proc is not None and proc.poll() is None and _panel_visible() and time.monotonic()-j.get('idle_since',0.)<IDLE_WORKER_SECONDS:return 5.
     _idle_worker=None;j['retain_worker']=False;_dispose(j);_ensure_timer()
     return None
 
@@ -346,7 +363,7 @@ def status(source):
     return notices[0]['label'] if notices else _errors.get(source.session_uid,'')
 
 def notice(scene):
-                                                                                
+
     running=next((j for j in _jobs.values() if j['scene']==scene),None)
     if running:return running['key'],'RUNNING',running['label']
     for key,(owner,sc,state,msg) in reversed(_notices.items()):
@@ -376,9 +393,9 @@ def queue(source, method, factory, *, guard=None):
     _ensure_timer();_redraw()
 
 def invalidate(source):
-                                                                             
-                                                                             
-                                                                    
+
+
+
     key=(source.session_uid,'build_worn')
     j=_jobs.get(key)
     if j and j['iterator'] is not None:
@@ -396,11 +413,11 @@ def _finish(j, error=None):
     _notices[key]=(j['owner'],j['scene'],'ERROR' if error else 'READY',str(error) if error else 'Operation complete')
     while len(_notices)>32:_notices.pop(next(iter(_notices)))
     from . import incremental
-    j['retain_worker']=not error and j['key'][1]!='python_operation' and incremental.cache_enabled()
+    j['retain_worker']=not error and j['key'][1] not in {'python_operation', 'physics_preview'} and incremental.cache_enabled() and _panel_visible()
     _dispose(j);_redraw()
-                                                                       
-                                                                         
-    if not error and not bpy.app.background and not any(k[0]==key[0] for k in _jobs):
+
+
+    if not error and key[1]!='physics_preview' and not bpy.app.background and not any(k[0]==key[0] for k in _jobs):
         try:
             if bpy.context.preferences.edit.use_global_undo and bpy.ops.ed.undo_push.poll():
                 bpy.ops.ed.undo_push(message='Project Damage: Background Result')
@@ -416,8 +433,14 @@ def _tick():
     if not _jobs:
         _gestures.clear();return .1 if _retired else None
     if _retired:return .04
-                                                                            
-    j=next(iter(_jobs.values()));key=j['key'];source=j['owner'];scene=j['scene']
+
+    playing = live.playing_scenes()
+    j = next((job for job in _jobs.values()
+              if (job['key'][1] != 'build_worn' or job['scene'] not in playing
+                  or not valid_id(job['owner']) or not live.keeps_fragments(job['owner']))), None)
+    if j is None:
+        return .1
+    key=j['key'];source=j['owner'];scene=j['scene']
     try:
         if not valid_id(source) or not valid_id(scene) or not enabled(source) or source.data!=j['source_mesh'] or source.name not in scene.objects:
             _jobs.pop(key);_dispose(j);_redraw();return .02
@@ -442,10 +465,14 @@ def _tick():
             ok,j['value']=j['io'].result();j['io']=None
             if not ok:raise RuntimeError(j['value'])
             j['phase']='step'
-                                                                                              
+
         if interacting(scene):return .045
         target=build.result_of(source)
-        if live._busy(source):
+        editable = ()
+        if key[1]=='physics_preview':
+            from . import physics_live
+            editable = physics_live.inputs(source)
+        if live._busy(source, editable=editable):
             j['label']='Waiting for drawing or editing to finish';return .15
         if source.mode!='OBJECT' or (target and target.mode!='OBJECT'):
             j['label']='Waiting for Object Mode';return .15
@@ -484,7 +511,7 @@ HEAVY_EFFECTS = {
 }
 
 
-def confirm_effect(context, source, key, action, variant=''):
+def confirm_effect(context, source, key, action, variant='', *, instance=0):
     """Show the preflight before an interactive add or refresh, once per click."""
     if source is None:
         return False
@@ -515,6 +542,7 @@ def confirm_effect(context, source, key, action, variant=''):
         ):
             op = layout.operator('project_damage.continue_effect', text=label, icon=icon)
             op.effect, op.action, op.variant = key, action, variant
+            op.instance = instance
             op.target_name, op.target_uid, op.choice = target_name, target_uid, choice
 
     context.window_manager.popup_menu(draw, title='Continue with ' + title, icon='INFO')
@@ -529,6 +557,7 @@ class PROJECT_DAMAGE_OT_continue_effect(bpy.types.Operator):
     effect: bpy.props.StringProperty(options={'SKIP_SAVE'})
     action: bpy.props.StringProperty(options={'SKIP_SAVE'})
     variant: bpy.props.StringProperty(options={'SKIP_SAVE'})
+    instance: bpy.props.IntProperty(options={'HIDDEN', 'SKIP_SAVE'})
     target_name: bpy.props.StringProperty(options={'SKIP_SAVE'})
     target_uid: bpy.props.StringProperty(options={'SKIP_SAVE'})
     choice: bpy.props.EnumProperty(items=(
@@ -553,7 +582,7 @@ class PROJECT_DAMAGE_OT_continue_effect(bpy.types.Operator):
             if self.variant:
                 status = bpy.ops.project_damage.boolean_variant_add(variant=self.variant, defer_rebuild=True)
             else:
-                status = bpy.ops.project_damage.effect_action(effect=self.effect, action=self.action)
+                status = bpy.ops.project_damage.effect_action(effect=self.effect, action=self.action, instance=self.instance)
             if status != {'FINISHED'} or self.action == 'APPLY':
                 return status
             live._dirty.pop(target.get('project_damage_uid'), None)

@@ -43,7 +43,7 @@
 #include "concrete_damage.h"
 #include "surface_chart.h"
 #include "damage_volume.h"
-#include "project_damage_bvh.h"
+#include "through_wall_exit.h"
 #include "project_damage_host.h"
 #include "project_damage_noise.h"
 #include "surface_noise.h"
@@ -472,9 +472,37 @@ void Frame(const ConcreteDamageParams& p, const V& n, V& t, V& b)
 
                                                                                       
 
+struct RebarSample {
+    V center;
+    bool exposed;
+    bool hole;
+};
+
+struct RebarRun {
+    uint64_t key, patch;
+    int firstIndex;
+    V normal, along, across;
+    double start, step, track, spacing;
+    std::vector<RebarSample> samples;
+    std::vector<std::shared_ptr<DamageObjectVolume>> volumes;
+
+    double End() const { return start + step * (samples.size() - 1); }
+
+    RebarSample At(double position) const
+    {
+        const double index = ClampD((position - start) / step, 0.0, double(samples.size() - 1));
+        const size_t left = std::min(size_t(index), samples.size() - 2);
+        const double f = index - left;
+        auto value = samples[left + (f >= 0.5)];
+        value.center = samples[left].center * (1.0 - f) + samples[left + 1].center * f;
+        return value;
+    }
+};
+
 struct Out {
 	m::Manifold cutter;
 	std::vector<m::Manifold> cracks, bars;
+    std::vector<RebarRun> objectBars;
 };
 
 struct Grid {
@@ -511,6 +539,163 @@ struct Ctx {
 	double offX, offY;                
 };
 
+void EmitRebar(const Ctx& cx, const RebarRun& run, std::vector<m::Manifold>& bars)
+{
+    const auto& p = *cx.p;
+    const double r = cx.barR;
+    const bool objectOpening = p.mode == 2;
+    const int last = int(run.samples.size()) - 1;
+    const double ribs = ClampD(p.rebarRibs, 0.0, 1.0);
+    const int sides = RebarLodSides(std::clamp(p.rebarSides, 4, 16), p.rebarResolution);
+    const double bend = ClampD(p.rebarBend, 0.0, 3.0);
+    const double outerRadius = r * (1.0 + ribs);
+    const double halfLane = std::max(0.0, 0.5 * run.spacing - 1.1 * outerRadius);
+    const uint64_t runKey = run.key * 131 + uint64_t(run.firstIndex);
+
+    int e0 = -1, e1 = -1, h0 = -1, h1 = -1, start = -1;
+    for (int i = 0; i <= last; ++i) {
+        const auto& sample = run.samples[size_t(i)];
+        if (sample.exposed) {
+            if (e0 < 0) e0 = i;
+            e1 = i;
+        }
+        if (objectOpening ? sample.exposed : sample.hole) {
+            if (start < 0) start = i;
+            if (h0 < 0 || (objectOpening && i - start > h1 - h0) || start == h0) {
+                h0 = start;
+                h1 = i;
+            }
+        } else {
+            start = -1;
+        }
+    }
+    const bool snap = h0 >= 0 && h1 - h0 >= 4
+        && Random01(cx.seed ^ run.patch, runKey, 4) < ClampD(p.rebarBroken, 0.0, 1.0);
+
+    auto emit = [&](int first, int end, int piece) {
+        if (end - first < 2) return;
+        std::vector<V> centers;
+        std::vector<double> radii;
+        centers.reserve(size_t(end - first + 1));
+        radii.reserve(centers.capacity());
+        const double half = std::max(run.step, 0.5 * (h1 - h0) * run.step);
+        const double side = Random01(cx.seed ^ run.patch, runKey, 6) - 0.5;
+        for (int i = first; i <= end; ++i) {
+            const auto& sample = run.samples[size_t(i)];
+            V center = sample.center;
+            if (piece < 0) {
+                if (e1 > e0 && i >= e0 && i <= e1) {
+                    const double f = double(i - e0) / (e1 - e0);
+                    center += run.normal * (bend * 0.6 * r * std::sin(m::kPi * f) * (sample.hole ? 2.5 : 1.0));
+                }
+            } else {
+                const double d = piece == 0 ? i - h0 : h1 - i;
+                const double f = std::max(0.0, d * run.step / half);
+                const double flex = bend * half * f * f;
+                double lateral = side * 0.3 * flex;
+                if (objectOpening && lateral != 0.0) {
+                    // Leave clearance for the neighboring bars at the displaced tip.
+                    const double shift = m::la::dot(center, run.across) - run.track;
+                    const double limit = std::max(0.0, halfLane - std::copysign(1.0, lateral) * shift);
+                    lateral = limit > 0.0 ? limit * std::tanh(lateral / limit) : 0.0;
+                }
+                center += run.normal * (0.5 * flex) + run.across * lateral;
+            }
+            centers.push_back(center);
+            radii.push_back(r * (1.0 + ((run.firstIndex + i) % 4 == 0 ? ribs : 0.0)));
+        }
+        if (piece >= 0) {
+            const size_t tip = piece == 0 ? radii.size() - 1 : 0;
+            radii[tip] *= 0.7;
+            radii[piece == 0 ? tip - 1 : 1] *= 0.85;
+        }
+        if (p.rebarResolution < 1.0) {
+            const auto ids = RebarLodIndices(centers, r, p.rebarResolution);
+            RebarLodSelect(centers, ids);
+            RebarLodSelect(radii, ids);
+            for (auto& rr : radii) rr = std::min(rr, r) + p.rebarResolution * std::max(0.0, rr - r);
+        }
+        auto bar = Tube(centers, radii, sides);
+        if (bar.IsEmpty()) return;
+        if (run.volumes.empty() || std::any_of(run.volumes.begin(), run.volumes.end(),
+                [&](const auto& volume) { return !volume || volume->Exposes(bar); }))
+            bars.push_back(std::move(bar));
+    };
+    if (!snap) {
+        emit(0, last, -1);
+        return;
+    }
+    const int split = h0 + int(std::floor((h1 - h0) * Lerp(0.3, 0.7, Random01(cx.seed ^ run.patch, runKey, 5))));
+    const double tipClearance = objectOpening ? 0.75 * outerRadius : 0.6 * r;
+    const int gap = std::max(1, int(std::ceil(tipClearance / run.step)));
+    if (objectOpening && split - gap < 2 && last - split - gap < 2) {
+        emit(0, last, -1);
+        return;
+    }
+    emit(0, split - gap, 0);
+    emit(split + gap, last, 1);
+}
+
+bool SharesRebar(const RebarRun& a, const RebarRun& b, double radius)
+{
+    if (b.start > a.End() || a.start > b.End() || m::la::dot(a.normal, b.normal) < 0.999999 ||
+        m::la::dot(a.along, b.along) < 0.999999) return false;
+    const double low = std::max(a.start, b.start), high = std::min(a.End(), b.End());
+    for (const double at : {low, 0.5 * (low + high), high})
+        if (m::la::length2(a.At(at).center - b.At(at).center) > radius * radius) return false;
+    return true;
+}
+
+void MergeRebar(RebarRun& a, const RebarRun& b)
+{
+    const double aEnd = a.End(), bEnd = b.End();
+    const double end = std::max(aEnd, bEnd);
+    const int count = int(std::clamp(std::ceil((end - a.start) / std::min(a.step, b.step)), 2.0, 12000.0));
+    const double step = (end - a.start) / count;
+    std::vector<RebarSample> samples;
+    samples.reserve(size_t(count + 1));
+    for (int i = 0; i <= count; ++i) {
+        const double position = i == count ? end : a.start + i * step;
+        if (position < b.start || position > bEnd) {
+            samples.push_back(a.At(position));
+        } else if (position > aEnd) {
+            samples.push_back(b.At(position));
+        } else {
+            auto value = a.At(position);
+            const auto other = b.At(position);
+            value.exposed |= other.exposed;
+            value.hole |= other.hole;
+            if (bEnd > aEnd && aEnd > b.start) {
+                const double t = (position - b.start) / (aEnd - b.start);
+                value.center = value.center * (1.0 - t) + other.center * t;
+            }
+            samples.push_back(value);
+        }
+    }
+    a.step = step;
+    a.samples = std::move(samples);
+    for (const auto& volume : b.volumes)
+        if (std::find(a.volumes.begin(), a.volumes.end(), volume) == a.volumes.end()) a.volumes.push_back(volume);
+}
+
+void EmitObjectRebars(const Ctx& cx, std::vector<RebarRun>& runs, std::vector<m::Manifold>& bars)
+{
+    // Resolve ownership of each lattice line before choosing any fracture.
+    std::stable_sort(runs.begin(), runs.end(), [](const RebarRun& a, const RebarRun& b) {
+        return a.key == b.key ? a.start < b.start : a.key < b.key;
+    });
+    std::vector<RebarRun> merged;
+    size_t first = 0;
+    for (auto& run : runs) {
+        if (!merged.empty() && merged.back().key != run.key) first = merged.size();
+        const auto same = std::find_if(merged.begin() + first, merged.end(),
+            [&](const auto& prior) { return SharesRebar(prior, run, cx.barR); });
+        if (same == merged.end()) merged.push_back(std::move(run));
+        else MergeRebar(*same, run);
+    }
+    for (const auto& run : merged) EmitRebar(cx, run, bars);
+}
+
 // строим одну область повреждения и её внутренние детали
 void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 {
@@ -537,7 +722,9 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 	const size_t N = size_t(g.nu + 1) * size_t(g.nv + 1);
 	g.h.assign(N, 0.0); g.d.assign(N, 0.0); g.s.assign(N, -1.0); g.thick.assign(N, -1.0); g.arc.assign(N, 0.0);
 	g.valid.assign(N, 0); g.holeF.assign(N, 0); g.owned.assign(N, 1);
-	std::vector<char> forbid(N, 0);
+    std::vector<char> forbid(N, 0);
+    std::vector<double> holeExit;
+    if ((P.hole && p.holeEnable) || p.profile == 2) holeExit.assign(N, -1.0);
 	const auto chart = p.organic ? s.chart.Select(P.o,P.n,extent*1.5,s.polyN) : std::vector<char>();
 
 	const V center = (s.lo + s.hi) * 0.5 - P.o;
@@ -561,7 +748,11 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 				const V S = P.o + P.t * u + P.b * v + P.n * g.h[k];
 				double th = 0.0;
 				int32_t tp = -1;
-				if (s.Ray(S - P.n * (1e-5 * s.diag), -P.n, 2.0 * s.diag, th, tp)) g.thick[k] = th;
+				if (s.Ray(S - P.n * (1e-5 * s.diag), -P.n, 2.0 * s.diag, th, tp)) {
+                    g.thick[k] = th;
+                    if (!holeExit.empty() && IsOpposingWallExit(*s.v, tp, th, P.n))
+                        holeExit[k] = th + 1e-5 * s.diag;
+                }
 			}
 		}
 	                                                                    
@@ -696,17 +887,20 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
                                                                           
                 const double wall=Smooth(0.0,cell*1.2,sv);
                 d=std::max(P.D,exposeDepth)*wall;
-                if(g.thick[k]>0 && P.D>=g.thick[k] && wall>.99) {
-                    d=g.thick[k]+margin;g.holeF[k]=1;
+                if (holeExit[k] > 0.0 && P.D >= holeExit[k] && wall > .99) {
+                    d = holeExit[k] + std::max(0.01, 1e-6 * s.diag);
+                    g.holeF[k] = 1;
+                } else if (g.thick[k] > 0.0) {
+                    d = std::min(d, 0.95 * g.thick[k]);
                 }
             }
             d = std::max(d, rimLip);
 			if (g.thick[k] > 0.0 && p.profile!=2) d = std::min(d, cap * g.thick[k]);
-			if (P.hole && p.holeEnable) {
+			if (P.hole && p.holeEnable && holeExit[k] > 0.0) {
 				const double sh = sv - holeThr + ampH * Fbm(W / (0.3 * sMax) + P.off + V(-21.0, 4.0, 13.0), 4);
 				if (sh > 0.0) {
 					const double f = Smooth(0.0, 0.7 * Wall, sh);
-					const double through = (g.thick[k] > 0.0 ? g.thick[k] : 3.0 * P.D + extent) + margin;
+					const double through = holeExit[k] + std::max(0.01, 1e-6 * s.diag);
 					d = Lerp(d, through, f);
 					if (f > 0.5) g.holeF[k] = 1;
 				}
@@ -859,7 +1053,7 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 	                                                                                        
 	if (p.generatedGeometry && p.rebarEnable && (p.rebarBarsX || p.rebarBarsY) && cx.barR > 0.0) {
 		const double r = cx.barR;
-		const int sides = RebarLodSides(std::max(4, std::min(p.rebarSides, 16)),p.rebarResolution);
+		const bool objectOpening = p.mode == 2;
 		const double ribs = ClampD(p.rebarRibs, 0.0, 1.0);
 		const double pitch = 1.4 * r;
 		for (int fam = 0; fam < 2; ++fam) {
@@ -869,8 +1063,10 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 			const bool outer = (fam == 0) == (p.rebarOuter == 0);
 			const double layer = cx.cover + r + (outer ? 0.0 : 1.9 * r);
 			const double sp = fam == 0 ? cx.barSpY : cx.barSpX;
+			const V along = fam == 0 ? P.t : P.b;
 			const V across = fam == 0 ? P.b : P.t;
 			const double base = m::la::dot(P.o, across);
+			const double alongBase = m::la::dot(P.o, along);
 			const double phase = fam == 0 ? cx.offY : cx.offX;
 			const double lo = (fam == 0 ? v0 : u0), hi = (fam == 0 ? v1 : u1);
 			const double alo = (fam == 0 ? u0 : v0), ahi = (fam == 0 ? u1 : v1);
@@ -887,31 +1083,33 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 				if ((ahi - alo) / dsUse > 3000.0) dsUse = (ahi - alo) / 3000.0;
 				const int ns = int(std::floor((ahi - alo) / dsUse));
 				if (ns < 2) continue;
-				struct Smp { V ctr; bool ok, exp, hole, own; double d; };
+				struct Smp { RebarSample bar; bool ok, own; double depth; };
 				std::vector<Smp> sm(size_t(ns + 1));
 				const V woff(Random01(cx.seed, key, 2) * 1000.0, Random01(cx.seed, key, 3) * 1000.0, 0.0);
 				for (int i = 0; i <= ns; ++i) {
 					const double a = alo + i * dsUse;
 					const double u = fam == 0 ? a : c, v = fam == 0 ? c : a;
-					double hh, dd, th; bool hl, own;
+					double hh = 0.0, dd = 0.0, th = -1.0;
+					bool hl = false, own = false;
 					Smp& q = sm[size_t(i)];
 					q.ok = g.Sample(Q, u, v, hh, dd, th, hl, own);
 					q.ok = q.ok && (th < 0.0 || th > layer + 2.0 * r);
 					q.own = own;
-					q.hole = hl;
-					q.d = dd;
-					q.exp = q.ok && dd > layer - r;                                        
+					q.depth = dd;
+					q.bar.hole = hl;
+					q.bar.exposed = q.ok && dd > layer - r;
 					const V W = P.o + P.t * u + P.b * v;
 					const double wa = ClampD(p.rebarWobble, 0.0, 4.0) * r;
-					const double w1 = wa * Fbm(V(a / (0.7 * sp), 0.3, 0.0) + woff, 2);
-					const double w2 = wa * Fbm(V(a / (0.7 * sp), 5.3, 0.0) + woff, 2);
-					q.ctr = W + P.n * (hh - layer + w1) + across * w2;
+					const double wobbleT = (objectOpening ? alongBase + a : a) / (0.7 * sp);
+					const double w1 = wa * Fbm(V(wobbleT, 0.3, 0.0) + woff, 2);
+					const double w2 = wa * Fbm(V(wobbleT, 5.3, 0.0) + woff, 2);
+					q.bar.center = W + P.n * (hh - layer + w1) + across * w2;
 				}
 				                                                                 
 				const int ext = int(std::ceil(cx.embed / dsUse));
 				std::vector<char> keep(size_t(ns + 1), 0);
 				for (int i = 0; i <= ns; ++i) {
-					if (!sm[size_t(i)].ok || !(sm[size_t(i)].d > 0.5 * (layer - r))) continue;
+					if (!sm[size_t(i)].ok || !(sm[size_t(i)].depth > 0.5 * (layer - r))) continue;
 					for (int e = std::max(0, i - ext); e <= std::min(ns, i + ext); ++e) keep[size_t(e)] = 1;
 				}
 				for (int i = 0; i <= ns; ++i) if (!sm[size_t(i)].ok || !sm[size_t(i)].own) keep[size_t(i)] = 0;
@@ -921,73 +1119,18 @@ void BuildPatch(const Ctx& cx, const Patch& P, Out& out)
 					int j = i;
 					while (j + 1 <= ns && keep[size_t(j + 1)]) ++j;
 					                    
-					int ex = 0;
-					for (int q = i; q <= j; ++q) ex += sm[size_t(q)].exp ? 1 : 0;
-					if (ex * dsUse >= 2.0 * r && j - i >= 2) {
-						std::vector<V> ctr(size_t(j - i + 1));
-						std::vector<double> rad(size_t(j - i + 1), r);
-						for (int q = i; q <= j; ++q) {
-							ctr[size_t(q - i)] = sm[size_t(q)].ctr;
-							if (ribs > 0.0 && (q % 4) == 0) rad[size_t(q - i)] = r * (1.0 + ribs);
-						}
-						                                 
-						int h0 = -1, h1 = -1;
-						for (int q = i; q <= j; ++q)
-							if (sm[size_t(q)].hole) { if (h0 < 0) h0 = q; h1 = q; }
-							else if (h0 >= 0) break;
-						const uint64_t runKey = key * 131 + uint64_t(i);
-						const bool snap = h0 >= 0 && h1 - h0 >= 4
-							&& Random01(cx.seed ^ P.id, runKey, 4) < ClampD(p.rebarBroken, 0.0, 1.0);
-						const double bend = ClampD(p.rebarBend, 0.0, 3.0);
-						if (!snap) {
-							                            
-							int e0 = -1, e1 = -1;
-							for (int q = i; q <= j; ++q) if (sm[size_t(q)].exp) { if (e0 < 0) e0 = q; e1 = q; }
-							if (e1 > e0)
-								for (int q = e0; q <= e1; ++q) {
-									const double f = double(q - e0) / (e1 - e0);
-									ctr[size_t(q - i)] = ctr[size_t(q - i)] + P.n * (bend * 0.6 * r * std::sin(m::kPi * f) * (sm[size_t(q)].hole ? 2.5 : 1.0));
-								}
-							if(p.rebarResolution<1.0) {
-                                const auto ids=RebarLodIndices(ctr,r,p.rebarResolution);
-                                RebarLodSelect(ctr,ids);RebarLodSelect(rad,ids);
-                                for(auto& rr:rad)rr=std::min(rr,r)+p.rebarResolution*std::max(0.0,rr-r);
-                            }
-                            m::Manifold bar = Tube(ctr, rad, sides);
-							if (!bar.IsEmpty()) out.bars.push_back(std::move(bar));
+					int exposed = 0;
+					for (int q = i; q <= j; ++q) exposed += sm[size_t(q)].bar.exposed;
+					if (exposed * dsUse >= 2.0 * r && j - i >= 2) {
+						RebarRun run{key, P.id, i, P.n, along, across, alongBase + alo + i * dsUse,
+						             dsUse, kk * sp + phase, sp, {}, {}};
+						run.samples.reserve(size_t(j - i + 1));
+						for (int q = i; q <= j; ++q) run.samples.push_back(sm[size_t(q)].bar);
+						if (objectOpening) {
+							run.volumes.push_back(P.volume);
+							out.objectBars.push_back(std::move(run));
 						} else {
-							const int brk = h0 + int(std::floor((h1 - h0) * Lerp(0.3, 0.7, Random01(cx.seed ^ P.id, runKey, 5))));
-							const int gap = std::max(1, int(std::ceil(0.6 * r / dsUse)));
-							const double holeHalf = std::max(dsUse, 0.5 * (h1 - h0) * dsUse);
-							const double side = Random01(cx.seed ^ P.id, runKey, 6) - 0.5;
-							for (int piece = 0; piece < 2; ++piece) {
-								const int a = piece == 0 ? i : brk + gap, b = piece == 0 ? brk - gap : j;
-								if (b - a < 2) continue;
-								std::vector<V> pc;
-								std::vector<double> pr;
-								for (int q = a; q <= b; ++q) {
-									V c3 = ctr[size_t(q - i)];
-									const int from = piece == 0 ? h0 : h1;
-									const double dIn = piece == 0 ? double(q - from) * dsUse : double(from - q) * dsUse;
-									if (dIn > 0.0) {
-										const double f = dIn / holeHalf;
-										c3 = c3 + P.n * (bend * 0.5 * holeHalf * f * f) + across * (side * bend * 0.3 * holeHalf * f * f);
-									}
-									pc.push_back(c3);
-									pr.push_back(rad[size_t(q - i)]);
-								}
-								                      
-								const size_t tip = piece == 0 ? pr.size() - 1 : 0;
-								pr[tip] *= 0.7;
-								if (pr.size() > 2) pr[piece == 0 ? tip - 1 : 1] *= 0.85;
-								if(p.rebarResolution<1.0) {
-                                    const auto ids=RebarLodIndices(pc,r,p.rebarResolution);
-                                    RebarLodSelect(pc,ids);RebarLodSelect(pr,ids);
-                                    for(auto& rr:pr)rr=std::min(rr,r)+p.rebarResolution*std::max(0.0,rr-r);
-                                }
-                                m::Manifold bar = Tube(pc, pr, sides);
-								if (!bar.IsEmpty()) out.bars.push_back(std::move(bar));
-							}
+							EmitRebar(cx, run, out.bars);
 						}
 					}
 					i = j + 1;
@@ -1299,14 +1442,16 @@ void PlaceConcreteDamage(const CoreInput& in, const ConcreteDamageParams& pIn, I
             auto settings=p;settings.thicknessCap=0.;settings.crackEnable=false;settings.holeEnable=false;
             auto local=cx;local.p=&settings;BuildPatch(local,patch,outs[size_t(i)]);
             auto& result=outs[size_t(i)];result.cutter=result.cutter^patch.volume->solid;result.cracks.clear();
-            FilterDamageObjectGeometry(result.bars,*patch.volume);
         } else BuildPatch(cx,patch,outs[size_t(i)]);
 	});
     for(const auto& volume:objectVolumes)if(std::none_of(patches.begin(),patches.end(),[&](const auto& patch){return patch.volume==volume;}))cutters.push_back(volume->solid.AsOriginal());
+	std::vector<RebarRun> objectBars;
 	for (Out& o : outs) {
 		if (!o.cutter.IsEmpty()) cutters.push_back(std::move(o.cutter));
 		for (auto& c : o.cracks) cracks.push_back(std::move(c));
 		for (auto& b : o.bars) rebar.push_back(std::move(b));
+		for (auto& run : o.objectBars) objectBars.push_back(std::move(run));
 	}
+	EmitObjectRebars(cx, objectBars, rebar);
 }
 PROJECT_DAMAGE_NS_MACRO_END

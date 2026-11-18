@@ -46,3 +46,29 @@ def generate(p,chart,damage,unit):
     frames=np.asarray(data['frames'],dtype=np.float64).copy();frames[:,1:3]/=factor
     mapped=chart.map_members(points,frames,data['vertex_pieces'])
     return mapped,np.asarray(data['faces']),np.asarray(data['materials']).ravel(),np.asarray(data['pieces']).ravel(),points
+
+
+def generate_edge(p,centers,normal,unit):
+    from .structure_rebuild import frames
+
+    path=np.asarray(centers,dtype=np.float64)
+    normals,sides=frames(path,normal)
+    distances=np.r_[0.,np.cumsum(np.linalg.norm(np.diff(path,axis=0),axis=1))]
+    half_width=p.width*unit*.5
+    half_depth=p.thickness*unit*.5
+    corners=((-half_width,-half_depth),(half_width,-half_depth),
+             (half_width,half_depth),(-half_width,half_depth))
+    points=[];flat=[]
+    for center,n,side,distance in zip(path,normals,sides,distances):
+        for x,z in corners:
+            points.append(center+x*side+z*n)
+            flat.append((x,distance,z))
+    faces=[(0,1,2,3)]
+    for ring in range(len(path)-1):
+        start=ring*4
+        for corner in range(4):
+            next_corner=(corner+1)%4
+            faces.append((start+corner,start+4+corner,start+4+next_corner,start+next_corner))
+    end=(len(path)-1)*4
+    faces.append((end+3,end+2,end+1,end))
+    return points,faces,flat

@@ -2,20 +2,21 @@
 
 **Project Damage | Procedural Destruction Toolkit** — Python add-on and C++ geometry sources.
 
-Maintained by **Vladislav Maltsev / Lazy3D**. Snapshot: **14 November 2026**, add-on version **0.15.49**. The date identifies this snapshot because several development updates share the same version number.
+Maintained by **Vladislav Maltsev / Lazy3D**. Release source snapshot: **Project Damage 1.0.0**, 17 November 2026.
 
-This repository contains the editable source for all generators in the installed add-on, including hidden and legacy implementations still referenced by the code. It contains no compiled native modules. This is a source distribution, not the complete ready-to-install product package.
+This source distribution includes the released macOS Python add-on and the C++ sources for Core, Peeling and Cell Cuts. The Windows overlay reproduces the Windows release Python files and manifest. For a ready-to-install add-on, use the corresponding release package.
 
 ## Contents
 
-- `project_damage/*.py`: all 187 Python modules: interface, generators, drawing, materials, physics, live updates and background workers.
-- `project_damage/core/source/source/`: geometry implementations and headers.
-- `project_damage/core/source/core_standalone/`: the main Python/C++ binding.
+- [`project_damage source/`](project_damage%20source): 193 Python modules from the macOS release.
+- [`windows-x64-python.patch`](windows-x64-python.patch): Python and manifest changes for the Windows x64 release, which contains 194 Python modules.
+- `project_damage source/core/source/source/`: geometry implementations and headers.
+- `project_damage source/core/source/core_standalone/`: the main Python/C++ binding.
 - `CMakeLists.txt`: portable build for the main core, Peeling and Cell Cuts.
 - `third_party/`: source-only dependency archives, checksums and attribution. CMake extracts them into its build folder; no dependency download is needed.
 - `BUILDING.md`: build, verification and installation instructions.
 - `LICENSE`, `CREDITS.txt`, `THIRD_PARTY_NOTICES.txt`, `licenses/`: licensing and upstream acknowledgments.
-- `SOURCE_MANIFEST.json`: checksums of the published project sources.
+- [`SOURCE_MANIFEST.json`](SOURCE_MANIFEST.json): source checksums and provenance for the two release archives.
 
 Optional material libraries, material `.blend` files, preview packs, rendered documentation and user scenes are not included. They are not needed to compile the native modules. For the complete interface and bundled material assets, use the corresponding add-on distribution. User preferences, private presets, caches, build products and credentials are excluded.
 

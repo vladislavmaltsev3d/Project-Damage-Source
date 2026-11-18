@@ -9,8 +9,7 @@ ASSETS=(('plank_surface','Plank Surface','','MOD_BUILD'),('cable_curve','Cable C
         ('cloth_hanging','Cloth Hanging','','MOD_CLOTH'),
         ('cloth_curve','Cloth Along Curve','','MOD_CLOTH'),
         ('cloth_empties','Cloth Around Empties','','MOD_CLOTH'))
-DAMAGE_KINDS = {'gen_metal':'METAL','gen_erosion':'EROSION'}
-DUAL_ASSETS=(('gen_metal','Torn Metal','','MOD_SOLIDIFY'),)
+DAMAGE_KINDS = {'gen_erosion':'EROSION'}
 from . import structure_surface
 ASSETS += tuple((key,title,'','OUTLINER_OB_MESH') for key,(title,kind) in structure_surface.KINDS.items())
 KEYS={r[0] for r in ASSETS}
@@ -42,15 +41,17 @@ def draw(layout,context):
     if ob is None:return
     if structure_surface.owner(context) is not None:
         with editorial.scope(ob['pd_structure_asset']):
-            return structure_surface.draw(layout,context)
-    from . import damage_gen_common
-    if damage_gen_common.kind_of(ob) is not None:
-        damage_gen_common.draw_settings(layout, context, ob)
-        return
-    key='plank_surface' if plank_surface.owner(context) is not None else ob.get('project_damage_cloth_asset')
-    if not key:key='cable_proximity' if ob.type=='EMPTY' else 'cable_curve'
-    with editorial.scope(key):
-        return _draw_geometry(layout,context)
+            structure_surface.draw(layout,context)
+    else:
+        from . import damage_gen_common
+        if damage_gen_common.kind_of(ob) is not None:
+            damage_gen_common.draw_settings(layout, context, ob)
+        else:
+            key='plank_surface' if plank_surface.owner(context) is not None else ob.get('project_damage_cloth_asset')
+            if not key:key='cable_proximity' if ob.type=='EMPTY' else 'cable_curve'
+            with editorial.scope(key):
+                _draw_geometry(layout,context)
+    layout.operator('project_damage.delete_generator_asset', text='Delete', icon='TRASH')
 
 
 def _draw_geometry(layout,context):
@@ -65,6 +66,68 @@ def _draw_geometry(layout,context):
         material_controls.centered_heading(layout,dict((r[0],r[1]) for r in ASSETS).get(ob.get('project_damage_cloth_asset',''),'Cloth Sheets'),icon='MOD_CLOTH')
         cloth.PROJECT_DAMAGE_PT_cloth_sheets.draw(SimpleNamespace(layout=layout),context)
     else:cable_generator.draw_settings(layout,context,show_sources=False)
+
+
+def _remove_object(obj):
+    data = obj.data
+    kind = obj.type
+    bpy.data.objects.remove(obj, do_unlink=True)
+    if data is None or data.users:
+        return
+    collection = {'MESH': bpy.data.meshes, 'CURVE': bpy.data.curves,
+                  'GREASEPENCIL': bpy.data.grease_pencils}.get(kind)
+    if collection is not None:
+        collection.remove(data)
+
+
+class PROJECT_DAMAGE_OT_delete_generator_asset(bpy.types.Operator):
+    bl_idname = 'project_damage.delete_generator_asset'
+    bl_label = 'Delete Generator'
+    bl_description = 'Delete the standalone generator and its generated geometry'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        ob = owner(context)
+        return context.mode == 'OBJECT' and ob is not None and ob.is_editable
+
+    def execute(self, context):
+        from . import cable_generator, cloth, damage_gen_common, plank_surface, runtime_lookup
+        source = owner(context)
+        helpers = set()
+        result = None
+        if source.get('pd_structure_source'):
+            result = structure_surface.output(source)
+            helpers = {obj for obj in bpy.data.objects
+                       if obj != result and obj.get('pd_structure_owner') == source}
+        elif source.get('pd_plank_surface'):
+            helpers = {obj for obj in source.children if obj.get('pd_plank_owner') == source.name}
+        elif damage_gen_common.kind_of(source):
+            helpers = {obj for obj in source.children if obj.get(damage_gen_common.MARKER)}
+        elif source.get('project_damage_cloth_asset'):
+            result = cloth._result(source.project_damage_cloth, source, context.active_object)
+        elif cable_generator.owner_of(source) is not None:
+            return bpy.ops.project_damage.cable_gen_remove()
+        else:
+            return {'CANCELLED'}
+
+        if helpers:
+            users = bpy.data.user_map(subset=helpers)
+            for obj in helpers:
+                if any(isinstance(user, bpy.types.Object) and user not in {obj, source, result}
+                       for user in users.get(obj, ())):
+                    continue
+                _remove_object(obj)
+        if result is not None:
+            _remove_object(result)
+        for child in list(source.children):
+            world = child.matrix_world.copy()
+            child.parent = None
+            child.matrix_world = world
+        _remove_object(source)
+        runtime_lookup.clear_planks()
+        return {'FINISHED'}
+
 
 # действие «Add Generator Asset»
 class PROJECT_DAMAGE_OT_add_generator_asset(bpy.types.Operator):

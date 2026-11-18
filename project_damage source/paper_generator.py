@@ -4,6 +4,7 @@
 from . import output_collections
 import math
 
+from . import guide_timing
 import bpy
 import numpy as np
 from mathutils import Vector
@@ -345,7 +346,7 @@ def _make_drawing(context, owner):
     obj['project_damage_paint_source'] = owner
     obj.hide_render = True
     for layer, color in DRAW_LAYERS:
-        gp.layers.new(layer)
+        gp.layers.new(layer).frames.new(guide_timing.FRAME)
         material = bpy.data.materials.new(name + ' ' + layer)
         bpy.data.materials.create_gpencil_data(material)
         material.grease_pencil.color = color
@@ -403,8 +404,8 @@ class PROJECT_DAMAGE_OT_draw_paper(bpy.types.Operator):
         if layer is None:
             layer = drawing.data.layers.new(self.action, set_active=True)
         drawing.data.layers.active = layer
-        if layer.current_frame() is None:
-            layer.frames.new(context.scene.frame_current)
+        if not layer.frames:
+            layer.frames.new(guide_timing.FRAME)
         if drawing.parent == owner and len(drawing.data.materials) == 2:
             drawing.active_material_index = 0 if self.action == 'Tear' else 1
         paint._start_drawing(context, drawing)

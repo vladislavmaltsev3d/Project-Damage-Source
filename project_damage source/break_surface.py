@@ -126,13 +126,18 @@ def _rim_faces(mesh, ids, cuts, totals):
 
 
 def finish_cut_surface_steps(mesh, matrix_world, unit_factor, pin_cm, smoothness, *,
-                             write_mask=True, rim_damage=False):
-    from . import effect_groups
+                             write_mask=True, rim_damage=False, owner=None):
+    from . import boolean_stack, effect_groups
 
     ids = effect_groups._face_values(mesh, effect_groups.ATTRIBUTE, np.int32)
     if ids is None:
         return
     cuts = ids == effect_groups.stamp_of('boolean')
+    if owner is not None:
+        owners = effect_groups._face_values(mesh, boolean_stack.FACE_OWNER, np.int32)
+        if owners is None:
+            return
+        cuts &= owners == owner
     if not cuts.any():
         return
 
@@ -140,10 +145,16 @@ def finish_cut_surface_steps(mesh, matrix_world, unit_factor, pin_cm, smoothness
     mesh.polygons.foreach_get('loop_total', totals)
     regions = [(cuts, smoothness)]
     if write_mask and rim_damage:
-        rim = _rim_faces(mesh, ids, cuts, totals)
-        if rim.any():
-            attr = mesh.attributes.get(RIM_FACES) or mesh.attributes.new(RIM_FACES, 'BOOLEAN', 'FACE')
-            attr.data.foreach_set('value', rim)
+        if owner is not None:
+            rim = effect_groups._face_values(mesh, RIM_FACES, bool)
+            if rim is not None:
+                rim &= owners == owner
+        else:
+            rim = _rim_faces(mesh, ids, cuts, totals)
+            if rim.any():
+                attr = mesh.attributes.get(RIM_FACES) or mesh.attributes.new(RIM_FACES, 'BOOLEAN', 'FACE')
+                attr.data.foreach_set('value', rim)
+        if rim is not None and rim.any():
             regions.append((rim, 0.0))
     for faces, strength in regions:
         yield from _finish_region_steps(
@@ -383,7 +394,7 @@ def _copy_surface(reference, targets, fields=SHARED_FIELDS):
 
 
 def _share_toggle(p, context):
-    if not live._HISTORY_RESTORING and p.break_share_surface:
+    if not live._HISTORY_RESTORING and not live._APPLYING and p.break_share_surface:
         reference = active_cutter(p) or next(iter(_rows(p.id_data)), None)
         if reference is not None:
             for cutter in _copy_surface(reference, _rows(p.id_data)):
@@ -396,9 +407,13 @@ def share_surface_edit(bp, context):
         return
     reference = bp.id_data
     changed = set()
+    from . import boolean_stack
     for source in live._scan().linkers:
-        if source.project_damage.break_share_surface:
-            cutters = _rows(source)
+        layers = [boolean_stack.layer_props(source, row) for row in boolean_stack.rows(source)]
+        for props in layers or (source.project_damage,):
+            if not props.break_share_surface:
+                continue
+            cutters = [row.obj for row in props.breakers if row.obj is not None and row.obj != source]
             if reference in cutters:
                 changed.update(_copy_surface(reference, cutters))
     live.touch_prop(bp, context)
@@ -408,7 +423,7 @@ def share_surface_edit(bp, context):
 
 def cutter_link_changed(row, context):
     source, cutter = row.id_data, row.obj
-    if not live._HISTORY_RESTORING and cutter is not None:
+    if not live._HISTORY_RESTORING and not live._APPLYING and cutter is not None:
         p = source.project_damage
         if p.break_share_surface:
             reference = active_cutter(p)

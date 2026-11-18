@@ -37,6 +37,8 @@ struct WeldResult
 
                                                                      
                                                         
+using WeldEdgePairs = std::vector<std::array<Int32, 2>>;
 bool BuildWelds(const MeshView& mv, const std::vector<float>& weights, const std::vector<std::vector<EVec>>& strokes,
-	const WeldParams& w, WeldResult& r);
+	const WeldParams& w, WeldResult& r, const WeldEdgePairs* selectedEdges = nullptr,
+	const WeldEdgePairs* excludedEdges = nullptr);
 PROJECT_DAMAGE_NS_MACRO_END

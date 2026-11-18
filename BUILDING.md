@@ -5,7 +5,7 @@
 - CMake 3.24 or newer and a C++17 compiler.
 - macOS: Xcode Command Line Tools; Apple Silicon for the supplied default loader path.
 - Windows: Visual Studio 2022 Build Tools with Desktop development with C++, Windows SDK and a 64-bit CPython development installation.
-- CPython 3.11 or newer, with development headers, matching the exact major/minor ABI and CPU architecture of the target Blender. This snapshot has been used with Blender 5.2.2 / CPython 3.13 and earlier CPython 3.11 builds.
+- CPython 3.11 or newer, with development headers, matching the exact major/minor ABI and CPU architecture of the target Blender. The macOS release includes CPython 3.11 and 3.13 modules. The Windows x64 release uses CPython 3.13.
 - NumPy in the verification interpreter for array-based generator calls. Blender normally supplies it.
 
 Blender may omit Python development headers. In that case use a matching CPython development installation, or pass `-DPython_INCLUDE_DIR=/path/to/matching/python/include` with headers and `pyconfig.h` from that same Python version and platform.
@@ -36,7 +36,7 @@ cmake --build build-cp313 --config Release --parallel 2 --target project_damage_
 cmake --install build-cp313 --config Release --component native --prefix build-package
 ```
 
-Modules are installed to `build-package/project_damage/core/win64-cp313/`. The C++ runtime is statically linked to avoid depending on a different MSVC runtime already loaded by Blender. Windows build instructions are provided, but this source snapshot has not been compiled or tested on Windows in this publication task.
+Modules are installed to `build-package/project_damage/core/win64-cp313/`. The C++ runtime is statically linked to avoid depending on a different MSVC runtime already loaded by Blender. These instructions build the published C++ sources on Windows. The exact Windows release C++ build tree has not been independently verified for this snapshot.
 
 Linux can compile the native targets with CMake, but this add-on snapshot's automatic loader does not implement a Linux platform directory. Linux add-on deployment is not advertised as tested or supported by this snapshot.
 
@@ -52,10 +52,14 @@ Keep the `.py` modules and native modules from the same source snapshot. Install
 
 `project_damage_peeling` is the exported module name. Some development distributions rename its file to `project_damage_peeling_runtime2...`; the existing Python loader accepts either filename.
 
-## What changed for publication
+## Windows release Python
 
-Generator algorithms and all installed Python modules are copied unchanged. The root CMake build replaces old host-specific scripts that referenced absent local files. Duplicate source entries were removed from the build list. Dependency source archives preserve the installed Manifold tree and the local sources used for oneTBB, Clipper2 and nanobind/robin-map. Build products are never committed.
+In a clean copy of the repository, run `git apply --whitespace=nowarn windows-x64-python.patch` to reproduce the Windows x64 release Python files and manifest in `project_damage source/`. The Windows package ships 194 Python modules. Keep the license and attribution files with either platform's sources.
 
-## Validation of this snapshot
+## Release provenance
 
-On 14 November 2026 the three native targets built successfully on macOS arm64 with AppleClang 21 and CPython 3.13.13, and passed `tools/verify_native.py`. All 187 add-on Python modules passed syntax parsing and match the installed source snapshot. This is a build/import check, not an exhaustive functional test of every generator.
+The macOS Python files and manifest match `Project_Damage_1.0.0_macOS.zip` byte for byte. Both retained macOS CMake build outputs for the main native core match the release ZIP. The macOS release reused its Peeling and Cell Cuts binaries from the preceding build. The Windows overlay was verified against `Project_Damage_1.0.0_Windows_x64.zip`. See `SOURCE_MANIFEST.json` for the corresponding checksums.
+
+## Build verification
+
+Core, Peeling and Cell Cuts were built from this repository on Apple Silicon with CPython 3.13.13. All three modules passed `tools/verify_native.py`.

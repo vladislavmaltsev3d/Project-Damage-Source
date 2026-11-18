@@ -1,6 +1,7 @@
 # рисуем повреждения самостоятельных конструкций через Grease Pencil
 """Grease Pencil damage bands for independent structural surfaces."""
 import math
+from . import guide_timing
 import bpy
 from mathutils import Vector, Matrix
 from mathutils.kdtree import KDTree
@@ -9,12 +10,12 @@ _session = None
 
 
 def source_for_drawing(drawing):
-    if drawing is None:
+    if drawing is None or drawing.type not in {'GREASEPENCIL', 'GPENCIL'}:
         return None
     if _session is not None:
         source = _session[0]
         try:
-            if source.pd_structure.drawing == drawing:
+            if drawing in (source.pd_structure.drawing, getattr(source.pd_structure, 'brick_loose_drawing', None)):
                 return source
         except ReferenceError:
             pass
@@ -66,13 +67,9 @@ def restore_saved_projection(source):
 
 
 def start(context, source, drawing):
-    global _session
     from . import paint
-    paint.finish_surface_projection()
-    restore_projection()
-    prepare_projection(source)
     try:
-        paint._start_drawing(context, drawing)
+        paint._start_drawing(context, drawing, structure_source=source)
     except Exception:
         restore_projection()
         raise
@@ -82,7 +79,7 @@ def finish(context, source):
     from . import paint, live, structure_surface
     live.finish_drawing(source)
     restore_projection()
-    paint._activate(context, structure_surface.output(source) or source)
+    paint._activate(context, source)
     if source.pd_structure.live_update:
         signature = structure_surface.state(source)
         if structure_surface._states.get(source.session_uid) != signature:
@@ -90,9 +87,16 @@ def finish(context, source):
 
 
 def new_drawing(context, source, role="DAMAGE"):
+    settings = source.pd_structure
+    prop = 'brick_loose_drawing' if role == 'LOOSE' else 'drawing'
+    previous = getattr(settings, prop)
+    draw_damage = settings.draw_damage
     label='Loose Bricks' if role=='LOOSE' else 'Structure Damage'
-    data = bpy.data.grease_pencils.new(source.name + ' '+label+' Drawing')
-    data.layers.new(label, set_active=True).frames.new(context.scene.frame_current)
+    drawings = getattr(bpy.data, 'grease_pencils_v3', None)
+    if drawings is None:
+        drawings = bpy.data.grease_pencils
+    data = drawings.new(source.name + ' '+label+' Drawing')
+    data.layers.new(label, set_active=True).frames.new(guide_timing.FRAME)
     drawing = bpy.data.objects.new(data.name, data)
     (source.users_collection[0] if source.users_collection else context.collection).objects.link(drawing)
     drawing.parent = source
@@ -104,8 +108,23 @@ def new_drawing(context, source, role="DAMAGE"):
     bpy.data.materials.create_gpencil_data(material)
     material.grease_pencil.color = (.1,.55,1.,.85) if role=='LOOSE' else (1., .2, .03, .85)
     data.materials.append(material)
-    setattr(source.pd_structure,'brick_loose_drawing' if role=='LOOSE' else 'drawing',drawing)
-    source.pd_structure.draw_damage = True
+    try:
+        setattr(settings, prop, drawing)
+        if getattr(settings, prop) != drawing:
+            raise RuntimeError('Could not assign the Grease Pencil drawing to ' + source.name)
+        settings.draw_damage = True
+        start(context, source, drawing)
+    except Exception:
+        if context.active_object == drawing:
+            finish(context, source)
+        setattr(settings, prop, previous)
+        settings.draw_damage = draw_damage
+        bpy.data.objects.remove(drawing, do_unlink=True)
+        if data.users == 0:
+            drawings.remove(data)
+        if material.users == 0:
+            bpy.data.materials.remove(material)
+        raise
     return drawing
 
 
@@ -128,7 +147,8 @@ def remove_drawing(context, source, role="DAMAGE"):
     materials = list(data.materials)
     bpy.data.objects.remove(drawing, do_unlink=True)
     if not data.users:
-        bpy.data.grease_pencils.remove(data)
+        drawings = getattr(bpy.data, 'grease_pencils_v3', None)
+        (bpy.data.grease_pencils if drawings is None else drawings).remove(data)
     for material in materials:
         if material and not material.users:
             bpy.data.materials.remove(material)
@@ -142,7 +162,7 @@ class PROJECT_DAMAGE_OT_structure_drawing(bpy.types.Operator):
     action: bpy.props.EnumProperty(items=[(key, label, description) for key, label, description in (
         ('NEW', 'New Drawing', 'Create a Grease Pencil damage drawing on the control plane'),
         ('DRAW', 'Draw / Edit', 'Draw damage on the control plane, ignoring foreground objects'),
-        ('FINISH', 'Finish Drawing', 'Return to the generated structure'),
+        ('FINISH', 'Finish Drawing', 'Return to the control plane'),
         ('REMOVE', 'Remove Drawing', 'Unlink this drawing; delete it only if it belongs exclusively to this generator'))])
     source_name: bpy.props.StringProperty(options={'HIDDEN'})
     role: bpy.props.EnumProperty(items=[('DAMAGE','Damage',''),('LOOSE','Loose Bricks','')],default='DAMAGE',options={'HIDDEN'})
@@ -164,13 +184,15 @@ class PROJECT_DAMAGE_OT_structure_drawing(bpy.types.Operator):
                 finish(context, source)
             elif self.action == 'REMOVE':
                 remove_drawing(context, source,self.role)
+            elif self.action == 'NEW':
+                new_drawing(context, source, self.role)
             else:
-                drawing = new_drawing(context, source,self.role) if self.action == 'NEW' else getattr(source.pd_structure,'brick_loose_drawing' if self.role=='LOOSE' else 'drawing')
+                drawing = getattr(source.pd_structure,'brick_loose_drawing' if self.role=='LOOSE' else 'drawing')
                 if drawing is None:
                     self.report({'WARNING'}, 'Create or assign a Grease Pencil drawing first')
                     return {'CANCELLED'}
                 start(context, source, drawing)
-        except (RuntimeError, ValueError) as exc:
+        except (RuntimeError, ValueError, TypeError) as exc:
             self.report({'ERROR'}, str(exc))
             return {'CANCELLED'}
         return {'FINISHED'}

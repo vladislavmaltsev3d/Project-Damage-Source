@@ -305,10 +305,10 @@ void Bead(const Path& path, const WeldParams& w, uint64_t seed, WeldResult& r)
 
 // основной вход: собираем геометрию по переданным настройкам
 bool BuildWelds(const MeshView& mv, const std::vector<float>& weights, const std::vector<std::vector<EVec>>& strokes,
-	const WeldParams& w, WeldResult& r)
+	const WeldParams& w, WeldResult& r, const WeldEdgePairs* selectedEdges, const WeldEdgePairs* excludedEdges)
 {
 	r = WeldResult();
-	if (mv.npolys <= 0) return false;
+	if (mv.npolys <= 0 && !selectedEdges) return false;
 	const uint64_t seed = 0x57454C44ULL ^ (uint64_t(uint32_t(w.seed)) * 0x9e3779b97f4a7c15ULL);
 	               
 	std::vector<V> fn((size_t)mv.npolys);
@@ -323,6 +323,13 @@ bool BuildWelds(const MeshView& mv, const std::vector<float>& weights, const std
 	if (w.edgesEnable)
 	{
 		std::map<std::pair<Int32, Int32>, std::vector<Int32>> ef;
+		if (selectedEdges)
+			for (const auto& edge : *selectedEdges)
+			{
+				const auto [a, b] = std::minmax(edge[0], edge[1]);
+				if (a >= 0 && b < mv.npts && a != b && Len(V(mv.pts[b]) - V(mv.pts[a])) > 1e-12)
+					ef.try_emplace({a, b});
+			}
 		for (Int32 i = 0; i < mv.npolys; ++i)
 		{
 			const ProjectDamagePoly& q = mv.polys[i];
@@ -331,9 +338,14 @@ bool BuildWelds(const MeshView& mv, const std::vector<float>& weights, const std
 			for (int k = 0; k < nv; ++k)
 			{
 				const Int32 a = ids[k], b = ids[(k + 1) % nv];
-				ef[{ std::min(a, b), std::max(a, b) }].push_back(i);
+				const std::pair<Int32, Int32> edge{std::min(a, b), std::max(a, b)};
+				if (!selectedEdges) ef[edge].push_back(i);
+				else if (auto it = ef.find(edge); it != ef.end()) it->second.push_back(i);
 			}
 		}
+		if (excludedEdges)
+			for (const auto& edge : *excludedEdges)
+				ef.erase({std::min(edge[0], edge[1]), std::max(edge[0], edge[1])});
 		const double cosLim = std::cos(w.angle * m::kPi / 180.0);
 		auto weightOf = [&](Int32 v) { return weights.empty() ? 1.0f : ((size_t)v < weights.size() ? weights[(size_t)v] : 0.0f); };
 		                                                          
@@ -350,19 +362,33 @@ bool BuildWelds(const MeshView& mv, const std::vector<float>& weights, const std
 		std::map<std::pair<Int32, Int32>, Edge> chosen;                                                  
 		for (const auto& e : ef)
 		{
-			if (e.second.size() != 2) continue;
+			if (e.second.size() != 2)
+			{
+				if (selectedEdges)
+				{
+					// A chosen edge can form a bead even on an open border or a loose wire.
+					const V t = Unit(V(mv.pts[e.first.second]) - V(mv.pts[e.first.first]), V(1, 0, 0));
+					const V axis = std::abs(t.z) < 0.9 ? V(0, 0, 1) : V(1, 0, 0);
+					const V n = e.second.empty() ? axis : fn[(size_t)e.second.front()];
+					const V out = Unit(n - t * m::la::dot(n, t), Unit(axis - t * m::la::dot(axis, t), V(0, 1, 0)));
+					const V side = Unit(m::la::cross(t, out), V(0, 1, 0));
+					chosen[e.first] = Edge{out, -side, side, 0.0};
+				}
+				continue;
+			}
 			const Int32 f1 = e.second[0], f2 = e.second[1];
 			const V n1 = fn[(size_t)f1], n2 = fn[(size_t)f2];
-			if (m::la::dot(n1, n2) > cosLim) continue;                                         
-			if (weightOf(e.first.first) < w.maskThreshold || weightOf(e.first.second) < w.maskThreshold) continue;
+			if (!selectedEdges && (m::la::dot(n1, n2) > cosLim
+				|| weightOf(e.first.first) < w.maskThreshold || weightOf(e.first.second) < w.maskThreshold))
+				continue;
 			                                                           
 			const ProjectDamagePoly& q2 = mv.polys[f2];
 			V off(0.0);
 			for (Int32 v : { q2.a, q2.b, q2.c, q2.d })
 				if (v != e.first.first && v != e.first.second) { off = V(mv.pts[v]); break; }
 			const bool concave = m::la::dot(off - V(mv.pts[e.first.first]), n1) > 0.0;
-			if (w.edgeType == 0 && !concave) continue;
-			if (w.edgeType == 1 && concave) continue;
+			if (!selectedEdges && w.edgeType == 0 && !concave) continue;
+			if (!selectedEdges && w.edgeType == 1 && concave) continue;
 			                                                                     
 			chosen[e.first] = Edge{ Unit(n1 + n2, n1), awayOf(f1, e.first), awayOf(f2, e.first), concave ? 1.0 : 0.0 };
 		}

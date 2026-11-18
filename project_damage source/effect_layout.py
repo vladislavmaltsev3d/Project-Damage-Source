@@ -43,6 +43,14 @@ def section(layout, title):
     return box
 
 
+def standalone_update(layout, settings, operator, *, action=None, label='Manual Update'):
+    row = layout.row(align=True)
+    row.prop(settings, 'live_update', text='Live Update', toggle=True, icon='AUTO')
+    button = row.operator(operator, text=label, icon='FILE_REFRESH')
+    if action is not None:
+        button.action = action
+
+
 # скрываем настройки, которые сейчас не влияют на выбранный режим
 def visible(owner, name):
     if 'avoid' in name.lower():return False

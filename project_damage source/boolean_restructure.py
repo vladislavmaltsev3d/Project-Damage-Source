@@ -50,7 +50,9 @@ def capture(source, result):
     if not wanted(source) or not fragments_of(source):
         return
     for body in bodies(source, result):
-        body[BASE] = flat(body.matrix_world)
+        com = body.get('project_damage_bfrag_com')
+        rest = source.matrix_world @ Matrix.Translation(Vector(com)) if com is not None else body.matrix_world
+        body[BASE] = flat(rest)
     for obj in outputs(source):
         mesh = obj.data
         old_template = obj.get('pd_structure_template')
@@ -280,11 +282,15 @@ def _regenerate_rebar(source,obj,trees):
 
 
 def restructure(context, source):
-    from . import build, boolean_break
+    from . import build, boolean_break, boolean_stack, wall_stack
     result = build.result_of(source)
     if result is None or not boolean_break.fragments_of(source):
         raise RuntimeError('Enable Separate Fragments and generate Boolean damage first')
     structures = outputs(source)
+    if boolean_stack.SERIAL in source:
+        row = boolean_stack.edited(source)
+        serial = boolean_stack.OUTPUT_OFFSET + row[boolean_stack.INSTANCE] if row else -1
+        structures = [obj for obj in structures if obj.get(wall_stack.INSTANCE) == serial]
     if not structures: raise RuntimeError('This Boolean Break has no internal structure')
     trees = None
     done = 0

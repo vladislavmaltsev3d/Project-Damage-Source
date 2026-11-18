@@ -1449,14 +1449,13 @@ def _plain_material(name, color, rough=0.6, metal=0.0):
     return mat
 
 
-def pipes_of(source):
-    uid = source.get('project_damage_uid')
-    return next((o for o in bpy.data.objects if uid is not None and o.type == 'MESH'
-                 and o.get(PIPES_STAMP) == uid), None)
+def pipes_of(source, instance=0):
+    from . import wall_stack
+    return next(wall_stack.output_objects(source, PIPES_STAMP, instance), None)
 
 
-def _remove(source):
-    obj = pipes_of(source)
+def _remove(source, instance=0):
+    obj = pipes_of(source, instance)
     if obj is not None:
         mesh = obj.data
         bpy.data.objects.remove(obj, do_unlink=True)
@@ -1500,9 +1499,9 @@ def _mesh_from(buf, name, factor, p):
     return mesh
 
 
-def _place(context, source, mesh):
-    obj = pipes_of(source)
-    name = source.name + '_project_damage_pipes'
+def _place(context, source, mesh, instance=0):
+    obj = pipes_of(source, instance)
+    name = source.name + '_project_damage_pipes' + (f' #{instance}' if instance else '')
     if obj is None:
         obj = bpy.data.objects.new(name, mesh)
     else:
@@ -1513,6 +1512,9 @@ def _place(context, source, mesh):
     obj.name = name
     mesh.name = name
     obj[PIPES_STAMP] = source.get('project_damage_uid')
+    if instance:
+        from .wall_stack import INSTANCE
+        obj[INSTANCE] = instance
     ownership.bind(source, obj)
     output_collections.link_object(context,source,obj)
     obj.matrix_world = source.matrix_world
@@ -1560,9 +1562,9 @@ def _down(source, scaled=False):
     return np.array(d.normalized()[:] if d.length > 1e-9 else (0.0, 0.0, -1.0))
 
 
-def _drawn(context, source, factor, sc=1.0):
+def _drawn(context, source, factor, sc=1.0, *, props=None):
     from . import paint
-    p = source.project_damage
+    p = source.project_damage if props is None else props
     return [np.ascontiguousarray(path * factor * sc, dtype=np.float64)
             for path in paint.read_paths(context, source, p.concrete_drawing)]
 
@@ -1646,14 +1648,14 @@ def _res_points(res, source, factor, sc):
     return (co @ m[:3, :3].T + m[:3, 3]) * factor
 
 
-def runs_for(context, source, S, points, src_bvh, factor, res=None, polys=None, res_bvh=None):
-    p = source.project_damage
+def runs_for(context, source, S, points, src_bvh, factor, res=None, polys=None, res_bvh=None, *, props=None):
+    p = source.project_damage if props is None else props
                                                                                 
     S.mw = _rotation(source)
     if damage_wanted(p):
                                                                               
                                                                             
-        faces = paint_faces(_drawn(context, source, factor, _scene_scale(source)), src_bvh, S.axes or 'AUTO')
+        faces = paint_faces(_drawn(context, source, factor, _scene_scale(source), props=p), src_bvh, S.axes or 'AUTO')
         return face_runs(S, points, src_bvh, faces)
     if res is not None and boolean_wanted(p) and not damage_wanted(p) and S.side != 'MID':
                                                                            
@@ -1674,11 +1676,11 @@ def runs_for(context, source, S, points, src_bvh, factor, res=None, polys=None, 
 
 
 # готовим данные этого эффекта перед расчётом геометрии
-def before_core(context, source, params, points, polys, factor, concrete_strokes, reports):
+def before_core(context, source, params, points, polys, factor, concrete_strokes, reports, *, props=None):
     """build.rebuild_object, before the fingerprint and the core call. Pipe
     Damage takes over the Concrete Damage block: paint strokes along the pipes,
     no rebar, deep enough to reach them. Returns the concrete strokes."""
-    p = source.project_damage
+    p = source.project_damage if props is None else props
     uid = source.get('project_damage_uid')
     if not wanted(p):
         _INPUTS.pop(uid, None)
@@ -1694,7 +1696,7 @@ def before_core(context, source, params, points, polys, factor, concrete_strokes
     sc = _scene_scale(source)
     pts = np.asarray(points, dtype=np.float64) * sc
     src_bvh = _bvh(pts, polys, guide=True)
-    strokes = _drawn(context, source, factor)
+    strokes = _drawn(context, source, factor, props=p)
     if not strokes:
         reports.append(({'INFO'}, 'Pipe Damage: draw the damaged area to create pipes'))
                                                                                
@@ -1710,20 +1712,21 @@ def before_core(context, source, params, points, polys, factor, concrete_strokes
     return strokes
 
 
-def after_build(context, source, res, reports=None, *, body_has_damage=True):
+def after_build(context, source, res, reports=None, *, body_has_damage=True, props=None, instance=0, damage=True, cut_body=None):
     """Keep the pipes uncovered by the complete damaged body, before splitting it."""
-    p = source.project_damage
+    p = source.project_damage if props is None else props
     boolean = boolean_wanted(p) and not damage_wanted(p)
     from .generated_geometry import enabled
-    if not enabled(p, 'boolean' if boolean else 'pipe'):
-        _remove(source)
+    if (not damage and not boolean) or not enabled(p, 'boolean' if boolean else 'pipe'):
+        _remove(source, instance)
         return None
     if res is None or res.type != 'MESH' or not wanted(p) or (boolean and not body_has_damage):
-        _remove(source)
+        _remove(source, instance)
         return None
     from . import incremental
-    existing=pipes_of(source)
-    if incremental.reuse_output(context,source,res,'pipes',existing):return existing
+    existing=pipes_of(source, instance)
+    cache_key = 'pipes' if not instance else ('pipes', instance)
+    if not instance and incremental.reuse_output(context,source,res,cache_key,existing):return existing
     from .params import unit_factor
     factor = unit_factor(context)
     uid = source.get('project_damage_uid')
@@ -1742,9 +1745,10 @@ def after_build(context, source, res, reports=None, *, body_has_damage=True):
         points = co.reshape(-1, 3) * factor * sc
         src_bvh = _mesh_bvh(mesh, unit, factor, guide=True)
     if src_bvh is None or len(points) == 0:
-        _remove(source)
+        _remove(source, instance)
         return None
-    res_bvh = _mesh_bvh(res.data, unit @ source.matrix_world.inverted() @ res.matrix_world, factor)
+    res_bvh = (_bvh(np.asarray(cut_body['points']) * sc, cut_body['polys']) if cut_body is not None else
+               _mesh_bvh(res.data, unit @ source.matrix_world.inverted() @ res.matrix_world, factor))
     scale=_gscale(p)
     if not damage_wanted(p):scale*=p.boolean_pipe_scale/100.
     S = Settings(p, scale)
@@ -1752,16 +1756,16 @@ def after_build(context, source, res, reports=None, *, body_has_damage=True):
         from .boolean_ui_controls import tube_settings
         tube_settings(S,p,'pipe')
     runs = [] if boolean and S.axes == () else runs_for(
-        context, source, S, points, src_bvh, factor, res, polys, res_bvh)
+        context, source, S, points, src_bvh, factor, res, polys, res_bvh, props=p)
     buf, counts = build_pipes(S, runs, src_bvh, res_bvh, _down(source, scaled=True), boolean=boolean)
     if not buf.faces:
-        _remove(source)
+        _remove(source, instance)
         if reports is not None:
             reports.append(({'INFO'}, 'Pipes: the damage does not reach the pipes yet'))
         return None
     from . import material_uv,material_controls,effect_groups
     uv_snapshots=material_uv.capture(source)
-    obj = _place(context, source, _mesh_from(buf, source.name + '_project_damage_pipes', factor * sc, p))
+    obj = _place(context, source, _mesh_from(buf, source.name + '_project_damage_pipes', factor * sc, p), instance)
     material_controls.apply_shared_output_material(source)
     material_uv.after_build(source,uv_snapshots)
     key='pipes' if damage_wanted(p) else 'boolean'
@@ -1771,14 +1775,17 @@ def after_build(context, source, res, reports=None, *, body_has_damage=True):
     obj.hide_render = False
     if reports is not None:
         reports.append(({'INFO'}, 'Pipes: %d pieces, %d broken ends' % (counts['pieces'], counts['broken'])))
-    incremental.remember_output(context,source,res,'pipes',obj)
+    if not instance:
+        incremental.remember_output(context,source,res,cache_key,obj)
     return obj
 
 
 def follow_source(source):
-    obj = pipes_of(source)
-    if obj is not None:
-        obj.matrix_world = source.matrix_world
+    uid = source.get('project_damage_uid')
+    if uid:
+        for obj in bpy.data.objects:
+            if obj.get(PIPES_STAMP) == uid:
+                obj.matrix_world = source.matrix_world
 
 
                                                                              
@@ -1874,8 +1881,9 @@ def draw_settings(layout, context):
         col.prop(p,'concrete_crack_length_max')
         col.prop(p,'concrete_crack_width')
         col.prop(p,'concrete_crack_depth')
+    from . import through_holes
     col=recording_tools.toggle_box(layout,p,'concrete_hole_enable','Break Through')
-    if col is not None:
+    if col is not None and through_holes.draw_controls(col, p, 'concrete'):
         col.prop(p,'concrete_hole_chance')
         col.prop(p,'concrete_hole_size')
         col.prop(p,'concrete_hole_jagged')

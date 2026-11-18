@@ -69,10 +69,12 @@ def drawings():
 @persistent
 def prepare_drawing_render(scene):
     """Exclude guide strokes while providing the passes Blender may still request."""
-    helpers = {obj for obj in scene.objects
-               if obj.type in _GP_TYPES and obj.get('project_damage_paint_source')}
+    drawings = {obj for obj in scene.objects if obj.type in _GP_TYPES}
+    if not drawings:
+        return
+    helpers = {obj for obj in drawings if obj.get('project_damage_paint_source')}
     for owner in scene.objects:
-        helpers.update(linked_drawings(owner))
+        helpers.update(drawings.intersection(linked_drawings(owner)))
     if not helpers:
         return
     for obj in helpers:
@@ -197,15 +199,19 @@ def physics_tools(context,obj):
           and physics_workflow.supported(context,obj))
                                                                        
  from . import material_controls
- knives=physics and key!='dbevel' and material_controls.ui_section(context)=='PHYSICS'
+ knives=physics and material_controls.ui_section(context)=='PHYSICS'
  return physics,knives
 
-def buttons(context,area,region):
- from . import background_compute as bg
+def buttons(context,area,region,*,visibility=None):
+ if visibility is None:
+  from . import background_compute as bg
+  visibility=(gpu_ui.sidebar_visible(area),bg.notice(context.scene))
+ sidebar,note=visibility
+ if not sidebar and not note:return []
  if context.window.as_pointer() in gpu_ui.BROWSER_WINDOWS:return []
- s=gpu_ui.scale(context);note=bg.notice(context.scene);items=[]
+ s=gpu_ui.scale(context);items=[]
  if note:items.append(('BG_'+note[1],36*s))
- if gpu_ui.sidebar_visible(area):
+ if sidebar:
   obj=source(context)
   if obj is not None:
    standalone=bool(obj.get('pd_structure_source'))
@@ -215,7 +221,7 @@ def buttons(context,area,region):
    if has_drawings(context,obj):items.append(('DRAWINGS',154*s))
    items += [('LIVE',36*s)]+([] if standalone else [('COMPUTE',36*s)])+([('UPDATE',92*s)] if manual else [])
    if knives:
-    items += [('CUT_THROUGH',112*s),('CUT_SURFACE',112*s),('CUT_GUIDANCE',100*s)]
+    items += [('CUT_THROUGH',112*s),('CUT_SURFACE',112*s),('CUT_GUIDANCE',100*s),('CUT_PLANE',90*s)]
     module=physics_workflow.active_module(context,obj)
     if (obj.get('project_damage_quick_physics_painting')
         and obj.get('project_damage_quick_physics_module',module)==module):
@@ -236,15 +242,22 @@ def _icon(kind,x,y,size,active=False):
 
 # собираем видимые настройки этого раздела
 def draw():
+ from . import background_compute as bg
  context=bpy.context
- if not context.area or not context.region:return
- obj=context.object
+ if not context.area or not context.region or not context.window:return
+ sidebar=gpu_ui.sidebar_visible(context.area)
+ note=bg.notice(context.scene)
+ target=(context.window.as_pointer(),context.area.as_pointer())
+ if not sidebar and not note:
+  _hit_regions.pop(target,None)
+  return
+ obj=context.object if sidebar else None
  if obj is not None and context.mode in {'PAINT_GREASE_PENCIL','PAINT_GPENCIL'} and obj.get('project_damage_draw_hint'):
   import blf
   blf.size(0,14);blf.color(0,1.,.8,.3,1.);blf.position(0,80,context.region.height-100,0)
   blf.draw(0,obj['project_damage_draw_hint'])
- rows=buttons(context,context.area,context.region)
- target=(context.window.as_pointer(),context.area.as_pointer())
+ rows=buttons(context,context.area,context.region,visibility=(sidebar,note))
+ if (sidebar and _display_pending) or (rows and target[0] not in _windows):wake()
  if not rows:
   _hit_regions.pop(target,None)
   return
@@ -256,6 +269,8 @@ def draw():
   for key,(x,y,w,h) in rows:
    x-=context.region.x;y-=context.region.y
    active=(not wm.project_damage_drawings_hidden) if key=='DRAWINGS' else (obj is not None and live_settings(obj).live_update) if key=='LIVE' else bool(obj and obj.project_damage.background_compute) if key=='COMPUTE' else (obj is not None and (obj.project_damage.cellf_curve_type==key[4:]) and context.mode=='PAINT_GREASE_PENCIL') if key.startswith('CUT_') else False
+   if key=='CUT_PLANE':
+    active=bool(obj and obj.project_damage.cellf_cut_plane and context.object==obj.project_damage.cellf_cut_plane)
    color=(.14,.32,.48,.94) if active else (.10,.115,.135,.94)
    if key.startswith('BG_'):color={'BG_RUNNING':(.21,.34,.56,.95),'BG_READY':(.12,.38,.21,.97),'BG_ERROR':(.53,.17,.13,.97)}[key]
    if hover[0]==key:color=tuple(min(1,v+.075) for v in color[:3])+(color[3],)
@@ -268,14 +283,14 @@ def draw():
     button_scale*=1+growth
     color=tuple(base+(highlight-base)*strength for base,highlight in zip(color,(.24,.49,.76,.98)))
    gpu_ui.rect(x,y,w,h,color,6*button_scale)
-   label=('Hide Drawings' if active else 'Show Drawings') if key=='DRAWINGS' else ('Live Update' if active else 'Manual Update') if key=='LIVE' else 'Through' if key=='CUT_THROUGH' else 'Surface' if key=='CUT_SURFACE' else 'Guidance' if key=='CUT_GUIDANCE' else 'Fracture & Physics' if key=='PHYSICS_FINISH' else 'Update'
+   label=('Hide Drawings' if active else 'Show Drawings') if key=='DRAWINGS' else ('Live Update' if active else 'Manual Update') if key=='LIVE' else {'CUT_THROUGH':'Through','CUT_SURFACE':'Surface','CUT_GUIDANCE':'Guidance','CUT_PLANE':'Cut Plane','PHYSICS_FINISH':'Fracture & Physics'}.get(key,'Update')
    if key=='DRAWINGS':label+='  '+str(round(wm.project_damage_drawing_opacity*100))+'%'
    if key.startswith('BG_') or key in {'LIVE','COMPUTE','CUT_THROUGH','CUT_SURFACE'}:
     _icon(key,x+6*s,y+6*s,20*s,active)
     if key.startswith('CUT_'):gpu_ui.text(label,x+32*s,y+10*s,12*s,width=w-37*s)
    else:gpu_ui.text(label,x+9*button_scale,y+10*button_scale,12*button_scale,width=w-18*button_scale,color=(.94,.95,.96,1) if key=='DRAWINGS' or obj else (.5,.5,.5,1))
   if hover[0] in {k for k,_ in rows} and time.monotonic()-hover[1]>.6:
-   message={'BG_RUNNING':'Operation in progress. Click to open Project Damage for this object.', 'BG_READY':'Operation complete. Click to frame the object and open Project Damage.', 'BG_ERROR':'Calculation failed. Click to inspect the message in Project Damage.', 'DRAWINGS':'Click: show / hide Project Damage drawings. Wheel: opacity.','LIVE':'Toggle Live Update. Enabled: rebuild automatically. Disabled: use the Update button.','COMPUTE':'Background Calculation. Right-click when on to set the CPU budget.','UPDATE':'Rebuild geometry now, keeping the current drawing active.','PHYSICS_FINISH':'Apply all three drawing layers to prepared fills, then enable rigid-body physics.','CUT_THROUGH':'Knife Through: draw a knife through the object. Later crossing cuts stop at earlier cuts.','CUT_SURFACE':'Split only pieces directly touched by the stroke. Deeper rows stay intact.','CUT_GUIDANCE':'Draw a density guide: smaller pieces near the stroke; no exact cut.'}[hover[0]]
+   message={'BG_RUNNING':'Operation in progress. Click to open Project Damage for this object.', 'BG_READY':'Operation complete. Click to frame the object and open Project Damage.', 'BG_ERROR':'Calculation failed. Click to inspect the message in Project Damage.', 'DRAWINGS':'Click: show / hide Project Damage drawings. Wheel: opacity.','LIVE':'Toggle Live Update. Enabled: rebuild automatically. Disabled: use the Update button.','COMPUTE':'Background Calculation. Right-click when on to set the CPU budget.','UPDATE':'Rebuild geometry now, keeping the current drawing active.','PHYSICS_FINISH':'Fracture prepared fills with the configured cuts, then enable rigid-body physics.','CUT_THROUGH':'Knife Through: draw a knife through the object. Later crossing cuts stop at earlier cuts.','CUT_SURFACE':'Split only pieces directly touched by the stroke. Deeper rows stay intact.','CUT_GUIDANCE':'Draw a density guide: smaller pieces near the stroke; no exact cut.','CUT_PLANE':'Add or edit a mesh plane that cuts across the fracture pieces.'}[hover[0]]
    x=rows[0][1][0]-context.region.x;y=rows[0][1][1]-context.region.y+40*s;w=min(context.region.width-24*s,len(message)*6.2*s)
    gpu_ui.rect(x,y,w,27*s,(.025,.03,.04,.98),4*s);gpu_ui.text(message,x+8*s,y+8*s,11*s,width=w-16*s)
  finally:gpu.state.blend_set(old)
@@ -334,7 +349,7 @@ class PROJECT_DAMAGE_OT_helper_update(bpy.types.Operator):
  @classmethod
  def poll(cls,context):return source(context) is not None
  def execute(self,context):
-  from . import build,live,incremental,structure_surface
+  from . import build,live,incremental,structure_surface,physics_live
   obj=source(context)
   if live._HISTORY_RESTORING or live._APPLYING:return {'CANCELLED'}
   if obj.get('pd_structure_source'):
@@ -345,6 +360,10 @@ class PROJECT_DAMAGE_OT_helper_update(bpy.types.Operator):
    except (RuntimeError,ValueError) as exc:
     self.report({'ERROR'},str(exc));return {'CANCELLED'}
    return {'FINISHED'} if result is not None else {'CANCELLED'}
+  try:result=physics_live.refresh(context,obj)
+  except RuntimeError as exc:
+   self.report({'ERROR'},str(exc));return {'CANCELLED'}
+  if result is not None:return result
   previous=live._APPLYING;live._APPLYING=True
   incremental.invalidate_body(obj)
   try:result,reports=build.rebuild_object(context,obj)
@@ -394,7 +413,9 @@ class PROJECT_DAMAGE_OT_viewport_helpers(bpy.types.Operator):
     rows=buttons(context,area,region)
    key=next((key for key,box in rows if gpu_ui.contains(box,event.mouse_x,event.mouse_y)),'')
    old=_hover.get(self.window,('',0,0,0));_hover[self.window]=(key,old[1] if key==old[0] else time.monotonic(),event.mouse_x,event.mouse_y)
-   if area and key!=old[0]:area.tag_redraw()
+   if area and key!=old[0]:
+    area.tag_redraw()
+    if key:wake()
    if not key:return {'PASS_THROUGH'}
    wm=context.window_manager
    if key=='DRAWINGS' and event.type in {'WHEELUPMOUSE','WHEELDOWNMOUSE'} and event.value=='PRESS':
@@ -422,11 +443,19 @@ class PROJECT_DAMAGE_OT_viewport_helpers(bpy.types.Operator):
       area.tag_redraw()
     elif key=='PHYSICS_FINISH' and source(context):bpy.ops.project_damage.finish_physics_paint()
     elif key=='UPDATE':_press_update(context,area)
-    elif key.startswith('CUT_') and source(context):bpy.ops.project_damage.cell_cut_draw(mode=key[4:])
+    elif key.startswith('CUT_') and (obj:=source(context)):
+     if key=='CUT_PLANE':
+      bpy.ops.project_damage.cell_cut_plane(action='SELECT' if obj.project_damage.cellf_cut_plane else 'ADD')
+     else:bpy.ops.project_damage.cell_cut_draw(mode=key[4:])
     return {'RUNNING_MODAL'}
   return {'PASS_THROUGH'}
 
 from contextlib import nullcontext as _noop
+
+def wake():
+ if _enabled and not bpy.app.background and not bpy.app.timers.is_registered(tick):
+  bpy.app.timers.register(tick,first_interval=.01)
+
 
 def tick():
  global _display_pending
@@ -434,10 +463,9 @@ def tick():
                                                                        
                                                                    
  if not hasattr(bpy.data,'objects') or not getattr(bpy.context,'view_layer',None):return .3
- if _display_pending:
-  display()
-  _display_pending=False
+ from . import background_compute as bg
  animating=False
+ watching=False
  windows=bpy.context.window_manager.windows
  valid={window.as_pointer() for window in windows}
  _windows.intersection_update(valid)
@@ -450,26 +478,32 @@ def tick():
   if key not in areas:_hit_regions.pop(key,None)
  for window in windows:
   ptr=window.as_pointer()
-  from . import background_compute as bg
   note=bg.notice(window.scene)
-  if not note and not any(gpu_ui.sidebar_visible(a) for a in window.screen.areas):
+  sidebar=any(gpu_ui.sidebar_visible(a) for a in window.screen.areas)
+  watching|=sidebar
+  if sidebar and _display_pending:
+   with bpy.context.temp_override(window=window):
+    display()
+   _display_pending=False
+  if not note and not sidebar:
    _hover.pop(ptr,None);_tooltip_shown.pop(ptr,None)
-   from . import background_compute as _bg
-   if ptr in _windows and not _bg._jobs:_windows.discard(ptr);_modal_owner.pop(ptr,None)
+   _windows.discard(ptr);_modal_owner.pop(ptr,None)
    for key in tuple(_hit_regions):
     if key[0]==ptr:_hit_regions.pop(key,None)
   if note and note[1]=='RUNNING':
    animating=True
    for area in window.screen.areas:
     if area.type=='VIEW_3D':area.tag_redraw()
-  if ptr not in _windows and any(a.type=='VIEW_3D' and (note or gpu_ui.sidebar_visible(a)) for a in window.screen.areas):
+  if ptr not in _windows and (note or sidebar) and any(a.type=='VIEW_3D' for a in window.screen.areas):
    with bpy.context.temp_override(window=window):bpy.ops.project_damage.viewport_helpers('INVOKE_DEFAULT')
   hover=_hover.get(ptr,('',0,0,0))
-  if hover[0] and time.monotonic()-hover[1]>.6 and _tooltip_shown.get(ptr)!=hover[1]:
-   _tooltip_shown[ptr]=hover[1]
-   for area in window.screen.areas:
-    if area.type=='VIEW_3D' and (note or gpu_ui.sidebar_visible(area)):area.tag_redraw()
- return .05 if animating else .3
+  if hover[0] and _tooltip_shown.get(ptr)!=hover[1]:
+   if time.monotonic()-hover[1]>.6:
+    _tooltip_shown[ptr]=hover[1]
+    for area in window.screen.areas:
+     if area.type=='VIEW_3D' and (note or gpu_ui.sidebar_visible(area)):area.tag_redraw()
+   else:watching=True
+ return .05 if animating else .3 if watching else None
 
 @persistent
 def loaded(*_):
@@ -494,7 +528,6 @@ def register():
  _token=object();_windows.clear();_modal_owner.clear();_hover.clear();_tooltip_shown.clear();_hit_regions.clear();_enabled=True;_display_pending=True
  if not bpy.app.background:
   _handle=bpy.types.SpaceView3D.draw_handler_add(draw,(),'WINDOW','POST_PIXEL')
-  bpy.app.timers.register(tick,first_interval=.5,persistent=True)
  if loaded not in bpy.app.handlers.load_post:bpy.app.handlers.load_post.append(loaded)
  for name, callback in _RENDER_HANDLERS:
   handlers = getattr(bpy.app.handlers, name)

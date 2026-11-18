@@ -2023,6 +2023,11 @@ ProjectDamageProps.__annotations__['rbf_impact_collection']=bpy.props.PointerPro
 for _name in ('rbf_cuts_drawing','rbf_impacts_drawing'):
     ProjectDamageProps.__annotations__[_name]=bpy.props.PointerProperty(name='Drawing',type=bpy.types.Object,poll=_paint_drawing_poll,update=live.touch_prop)
                                                                                     
+def _fracture_tool_changed(self, context):
+    from . import physics_live
+    physics_live.changed(self, context)
+
+
 def _cellf_meta(name):
     return next(r for r in EFFECT_META['cellf'] if r[0]==name)
 for _name,_items in (('material',('Wood','Glass','Concrete','Rock','Soil')),
@@ -2039,7 +2044,8 @@ for _name in ('enable','keep_remainder'):
 for _name,_min,_max in (('seed',0,100000),('pieces',1,2000),('max_pieces',2,5000),('glass_spokes',3,64),('guidance_amount',0,2000)):
     _row=_cellf_meta(_name)
     ProjectDamageProps.__annotations__['cellf_'+_name]=bpy.props.IntProperty(
-        name=_name.replace('_',' ').title(),default=_row[2],min=_min,max=_max,update=live.touch_prop,description=_row[3])
+        name=_name.replace('_',' ').title(),default=_row[2],min=_min,max=_max,
+        update=_fracture_tool_changed if _name == 'guidance_amount' else live.touch_prop, description=_row[3])
 for _name,_label,_min,_max,_soft in (
     ('gap','Gap (cm)',0.,1000.,5.),('size_variation','Size Variation',-1.,1.,1.),
     ('roughness','Roughness',-1.,1.5,1.5),('rough_scale','Rough Scale',.05,10.,3.),('detail','Detail',.01,4.,2.),
@@ -2058,7 +2064,8 @@ for _name,_label,_min,_max,_soft in (
     ('inner_uv_scale','Inner UV Scale (cm)',.001,10000.,100.),('smooth_angle','Smooth Angle (degrees)',0.,180.,180.)):
     _row=_cellf_meta(_name)
     ProjectDamageProps.__annotations__['cellf_'+_name]=bpy.props.FloatProperty(
-        name=_label,default=_row[2],min=_min,max=_max,soft_max=_soft,update=live.touch_prop,description=_row[3])
+        name=_label,default=_row[2],min=_min,max=_max,soft_max=_soft,
+        update=_fracture_tool_changed if _name.startswith('guidance_') else live.touch_prop, description=_row[3])
 ProjectDamageProps.__annotations__['cellf_prox_collection']=bpy.props.PointerProperty(
     name='Proximity',type=bpy.types.Collection,update=live.touch_prop,
     description='Empties and objects in this collection make the pieces smaller near them. An empty reaches its display size (with Use Empty Size), other objects reach Proximity Radius around their surface points')
@@ -2066,12 +2073,12 @@ ProjectDamageProps.__annotations__['cellf_prox_use_size']=bpy.props.BoolProperty
     name='Use Empty Size',default=True,update=live.touch_prop,
     description="An empty's display size x scale is its reach; off uses Proximity Radius for every object")
 ProjectDamageProps.__annotations__['cellf_drawing']=bpy.props.PointerProperty(
-    name='Drawing',type=bpy.types.Object,poll=_paint_drawing_poll,update=live.touch_prop)
+    name='Drawing',type=bpy.types.Object,poll=_paint_drawing_poll,update=_fracture_tool_changed)
 ProjectDamageProps.__annotations__['cellf_surface_drawing']=bpy.props.PointerProperty(
-    name='Surface Cut Drawing',type=bpy.types.Object,poll=_paint_drawing_poll,update=live.touch_prop,
+    name='Surface Cut Drawing',type=bpy.types.Object,poll=_paint_drawing_poll,update=_fracture_tool_changed,
     description='Split only pieces directly touched by the strokes; deeper rows stay intact')
 ProjectDamageProps.__annotations__['cellf_guidance_drawing']=bpy.props.PointerProperty(
-    name='Guidance Drawing',type=bpy.types.Object,poll=_paint_drawing_poll,update=live.touch_prop,
+    name='Guidance Drawing',type=bpy.types.Object,poll=_paint_drawing_poll,update=_fracture_tool_changed,
     description='Density guide, separate from the cut drawings. Smaller pieces gather around these strokes; they do not cut an exact seam')
 def _cell_layer_changed(self, context):
     from . import paint
@@ -2132,6 +2139,9 @@ for _field,_kind,_default,_length in rebar.FIELDS:
     else:_prop=bpy.props.FloatProperty(**_kw,soft_min=0,soft_max=10 if _field=='amount' else max(2,_default*4))
     ProjectDamageProps.__annotations__['rebar_'+('fill' if _field=='material' else _field)]=_prop
 ProjectDamageProps.__annotations__['rebar_drawing']=bpy.props.PointerProperty(name='Bar Curve',type=bpy.types.Object,poll=lambda self,obj:obj.type=='CURVE',update=live.touch_prop)
+ProjectDamageProps.__annotations__['rebar_drawn_material']=bpy.props.PointerProperty(
+    name='Hand-Drawn Rebar Material', type=bpy.types.Material, update=live.touch_prop,
+    description='Material of the bars built along the curve')
 from . import boolean_ui_controls
 boolean_ui_controls.add_properties(ProjectDamageProps)
 from . import displacement_shader
@@ -2295,6 +2305,9 @@ for _name, _prop in _pipes.PROPS.items():
 
 
                                                       
+from . import through_holes as _through_holes
+_through_holes.add_properties(ProjectDamageProps)
+
 from . import cables as _cables
 for _name, _prop in _cables.PROPS.items():
     ProjectDamageProps.__annotations__[_name] = _prop

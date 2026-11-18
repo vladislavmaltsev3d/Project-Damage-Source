@@ -241,4 +241,8 @@ def apply_registered_descriptions():
                 setattr(cls,name,new)
                 cls.__annotations__[name]=new
                 updated+=1
+    if updated:
+        # redefined properties are new RNA structs: drop cached property lists
+        from . import rna_fields
+        rna_fields.clear()
     return updated

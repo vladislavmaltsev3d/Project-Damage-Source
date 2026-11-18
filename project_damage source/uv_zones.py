@@ -1,12 +1,41 @@
 # разворачиваем только области повреждений, сохраняя внешнюю UV-карту
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Explicit, undoable UV generation on owned output material zones only."""
+from contextlib import ExitStack
+
 import bpy,bmesh
 import numpy as np
 from . import ownership,build,live,baked_materials
 from .mesh_io import CLASS_NAMES,BASE_CLASS,SHADING_REGION_ATTR
 from .result_transfer import MATERIAL_REGIONS
 UV_NAME='ProjectDamage_Zones'
+PRESERVE_OUTPUT_UV = 'project_damage_preserve_output_uv'
+_PROCEDURAL_OUTPUTS = (
+    PRESERVE_OUTPUT_UV, 'pd_structure_output', 'project_damage_gen',
+    'project_damage_generator_key', 'project_damage_bfrag_of',
+    'project_damage_rebar_of', 'project_damage_drawn_rebar_of', 'project_damage_concrete_rebar_of',
+    'project_damage_lath_of', 'project_damage_bricks_of', 'project_damage_pipes_of',
+    'project_damage_cables_of', 'project_damage_weld_of', 'project_damage_grass_of',
+    'project_damage_gravel_of', 'project_damage_foam_of', 'project_damage_paper_generator_of',
+    'project_damage_ivy_generated', 'project_damage_roots_generated',
+)
+_STRUCTURE_ATTRIBUTES = ('rebar_id', 'rebar_part', 'bar_id', 'pipe_id', 'cable_id',
+                         'project_damage_lath_piece', 'project_damage_brick_id')
+
+
+def preserves_output_uv(obj):
+    if obj.type != 'MESH':
+        return False
+    if (any(obj.get(key) for key in _PROCEDURAL_OUTPUTS)
+            or obj.get('project_damage_baked_effect') == 'boolean'
+            or obj.get('project_damage_fill_kind') == 'boolean'
+            or obj.get('project_damage_piece_module') == 'boolean'):
+        return True
+    # Older applied outputs lost their generator stamps but retain their piece IDs.
+    if obj.get('project_damage_baked_surface') or obj.get(build.RESULT_STAMP):
+        return False
+    return any(name in obj.data.attributes for name in _STRUCTURE_ATTRIBUTES)
+
 
 def targets(context,source):
     applied=baked_materials.target(context)
@@ -15,7 +44,7 @@ def targets(context,source):
     return [ob for ob in context.view_layer.objects if ob.type=='MESH' and ob!=source
             and uid and any(ob.get(key)==uid for key in ownership.STAMPS)]
 
-def _exclude_authored_wood(ob,mask):
+def _exclude_authored_materials(ob,mask):
     from .material_uv import preserve_generated_uv
     protected={i for i,m in enumerate(ob.data.materials) if preserve_generated_uv(m)}
     if protected:mask &= np.array([f.material_index not in protected for f in ob.data.polygons],bool)
@@ -23,16 +52,18 @@ def _exclude_authored_wood(ob,mask):
 
 
 def zone_mask(ob, *, protect_generated_uv=True):
+    from .material_uv import preserve_output_uv
     mesh=ob.data
+    if protect_generated_uv and preserve_output_uv(ob):return np.zeros(len(mesh.polygons),bool)
     if baked_materials.fragment(ob) or any(ob.get(key) for key in baked_materials._FRAGMENT_STAMPS):
         mask = baked_materials.inner_mask(ob)
-        return _exclude_authored_wood(ob, mask) if protect_generated_uv else mask
+        return _exclude_authored_materials(ob, mask) if protect_generated_uv else mask
     main_surface=ob.get(build.RESULT_STAMP) or ob.get('project_damage_baked_surface')
     if baked_materials.is_applied(ob) and 'project_damage_baked_surface' not in ob:
         main_surface=mesh.attributes.get(CLASS_NAMES[BASE_CLASS]) is not None
     if not main_surface:
         mask = np.ones(len(mesh.polygons), bool)
-        return _exclude_authored_wood(ob, mask) if protect_generated_uv else mask
+        return _exclude_authored_materials(ob, mask) if protect_generated_uv else mask
     mask=np.zeros(len(mesh.polygons),bool)
     names=[name for i,name in enumerate(CLASS_NAMES) if i!=BASE_CLASS]+[row[1] for row in MATERIAL_REGIONS]+[SHADING_REGION_ATTR]
     for name in names:
@@ -42,7 +73,7 @@ def zone_mask(ob, *, protect_generated_uv=True):
     ids=mesh.attributes.get('project_damage_effect_id')
     if ids is not None and ids.domain=='FACE':
         values=np.empty(len(mask),np.int32);ids.data.foreach_get('value',values);mask |= values==33
-    return _exclude_authored_wood(ob, mask) if protect_generated_uv else mask
+    return _exclude_authored_materials(ob, mask) if protect_generated_uv else mask
 
 def uv_state(mesh):
     layer=mesh.uv_layers.get(UV_NAME)
@@ -97,17 +128,66 @@ def unwrap_one(context,ob,mask):
         mesh.update()
     return len(groups)
 
+def _fracture_owner(context):
+    from . import inner_rough
+    source = baked_materials.target(context) or ownership.context_source(context)
+    if source is not None and source.get(inner_rough.DETAIL_STAMP):
+        source = ownership.source_of(source.parent)
+    return source
+
+
 def fracture_targets(context):
-    from . import damage_physics as dp, fracture_uv, inner_rough
-    source = ownership.context_source(context)
+    from . import fracture_uv
+    source = _fracture_owner(context)
     if source is None:
         return []
-    layer = context.view_layer
-    pieces = [obj for obj in dp.pieces_of(source) if obj.name in layer.objects]
-    selected = set(context.selected_objects)
-    selected |= {obj.parent for obj in selected if obj.get(inner_rough.DETAIL_STAMP)}
-    chosen = [obj for obj in pieces if obj in selected] or pieces
-    return [obj for obj in fracture_uv.with_details(chosen) if obj.name in layer.objects]
+    scene_objects = context.scene.objects
+    if baked_materials.is_applied(source):
+        pieces = baked_materials.fracture_objects(context, source, scene_wide=True)
+        walls = set(baked_materials.split_walls(pieces))
+        pieces = [obj for obj in pieces if obj not in walls]
+    else:
+        uid = source.get('project_damage_uid')
+        if not uid:
+            return []
+        stamps = [stamp for stamp in baked_materials._FRAGMENT_STAMPS if stamp != 'project_damage_fragment_of']
+        pieces = [obj for obj in scene_objects if obj.type == 'MESH'
+                  and not obj.get('project_damage_split_wall')
+                  and (any(obj.get(stamp) == uid for stamp in stamps)
+                       or (obj.get('project_damage_fragment_of') and ownership.source_of(obj) == source)
+                       or (obj.get('project_damage_baked_backup') == source and baked_materials.fragment(obj)))]
+    return list(dict.fromkeys(obj for obj in fracture_uv.with_details(pieces)
+                              if obj.type == 'MESH' and obj.name in scene_objects))
+
+
+def draw_inside_uv(layout, context, *, text='Quick UV Map', has_pieces=None):
+    row = layout.row(align=True)
+    row.enabled = bool(fracture_targets(context)) if has_pieces is None else has_pieces
+    row.operator('project_damage.unwrap_zones', text=text, icon='UV').fracture_inside = True
+    row.operator('project_damage.edit_zone_uv', text='Edit Scale', icon='FULLSCREEN_ENTER').fracture_inside = True
+
+
+def _restore_inside_uv(obj, original, name, coords, flags, owner_tag, slot_count, indices):
+    from . import fracture_uv
+    mesh = obj.data
+    if mesh != original:
+        obj.data = original
+        if mesh.users == 0:
+            bpy.data.meshes.remove(mesh)
+        return
+    current = fracture_uv.layer_name(mesh)
+    if name is None and current is not None:
+        mesh.uv_layers.remove(mesh.uv_layers[current])
+    elif name is not None:
+        mesh.uv_layers[name].uv.foreach_set('vector', coords)
+    if owner_tag is not None:
+        mesh[fracture_uv.OWNER] = owner_tag
+    elif fracture_uv.OWNER in mesh:
+        del mesh[fracture_uv.OWNER]
+    while len(mesh.materials) > slot_count:
+        mesh.materials.pop(index=len(mesh.materials)-1)
+    mesh.polygons.foreach_set('material_index', indices)
+    fracture_uv.copy_flags(mesh, *flags)
 
 
 def unwrap_fracture_inside(context):
@@ -116,15 +196,26 @@ def unwrap_fracture_inside(context):
     targets = [(obj, baked_materials.inner_mask(obj)) for obj in fracture_targets(context)]
     targets = [(obj, mask) for obj, mask in targets if mask.any()]
     if not targets:
-        raise ValueError('Fracture the fill to create inside faces first')
-    if any(not obj.is_editable or obj.data.library is not None for obj, _ in targets):
+        raise ValueError('No stored inside faces found on the fracture pieces of this Project Damage object')
+    if any(not obj.is_editable or obj.data.library is not None or obj.mode != 'OBJECT' for obj, _ in targets):
         raise ValueError('Make the fracture pieces local before unwrapping')
-    with material_update.shader_edit(context):
+    with material_update.shader_edit(context), ExitStack() as rollback:
         for obj, mask in targets:
-            if obj.data.users > 1:
-                obj.data = obj.data.copy()
+            mesh = obj.data
+            name = fracture_uv.layer_name(mesh)
+            coords = None
+            if name is not None:
+                coords = np.empty(len(mesh.loops)*2, np.float32)
+                mesh.uv_layers[name].uv.foreach_get('vector', coords)
+            indices = np.empty(len(mesh.polygons), np.int32)
+            mesh.polygons.foreach_get('material_index', indices)
+            rollback.callback(_restore_inside_uv, obj, mesh, name, coords, fracture_uv.flags(mesh),
+                              mesh.get(fracture_uv.OWNER), len(mesh.materials), indices)
+            if mesh.users > 1:
+                obj.data = mesh.copy()
             name = fracture_uv.project(obj, mask)
             material_uv.configure_zones(obj, mask, name)
+        rollback.pop_all()
     return len(targets)
 
 
@@ -138,15 +229,16 @@ class PROJECT_DAMAGE_OT_unwrap_zones(bpy.types.Operator):
     fracture_inside:bpy.props.BoolProperty(default=False,options={'HIDDEN','SKIP_SAVE'})
     @classmethod
     def description(cls,context,properties):
-        if properties.fracture_inside:
-            return 'Cube-project inside faces of selected physics pieces, or all pieces when none are selected, into their own UV map'
-        return ('Cube-project only inner damage faces on every applied fracture piece in this group. Exterior UV coordinates and other UV maps remain unchanged' if properties.all_fragments else cls.bl_description)
+        if properties.fracture_inside or properties.all_fragments:
+            return 'Cube-project inside faces on every fracture piece of this Project Damage object, including baked physics and applied geometry'
+        return cls.bl_description
     @classmethod
     def poll(cls,context):
-        source=ownership.context_source(context)
-        return context.mode=='OBJECT' and (baked_materials.target(context) is not None or (source is not None and source.type=='MESH' and build.result_of(source) is not None))
+        source = _fracture_owner(context)
+        return context.mode == 'OBJECT' and source is not None and source.type == 'MESH' and (
+            baked_materials.is_applied(source) or bool(source.get('project_damage_uid')) or build.result_of(source) is not None)
     def execute(self,context):
-        if self.fracture_inside:
+        if self.fracture_inside or self.all_fragments:
             try:
                 count = unwrap_fracture_inside(context)
             except (ValueError, RuntimeError) as exc:
@@ -155,7 +247,7 @@ class PROJECT_DAMAGE_OT_unwrap_zones(bpy.types.Operator):
             self.report({'INFO'}, 'Mapped inside faces on %d fracture pieces' % count)
             return {'FINISHED'}
         source=ownership.context_source(context)
-        chosen=baked_materials.fracture_objects(context,baked_materials.target(context),True) if self.all_fragments else targets(context,source)
+        chosen=targets(context,source) if source is not None else []
         objects=[(ob,zone_mask(ob)) for ob in chosen]
         objects=[(ob,mask) for ob,mask in objects if mask.any()]
         if not objects:
@@ -202,12 +294,14 @@ class PROJECT_DAMAGE_OT_unwrap_zones(bpy.types.Operator):
 def editable_uv_outputs(context, fracture_inside=False):
     if fracture_inside:
         from . import fracture_uv
+        selectable = set(context.selectable_objects)
         return [obj for obj in fracture_targets(context) if fracture_uv.layer_name(obj.data)
-                and obj.visible_get() and obj.is_editable and obj.data.library is None]
+                and obj in selectable and obj.is_editable and obj.data.library is None]
     source=ownership.context_source(context)
     if source is None:return []
+    from .material_uv import preserve_output_uv
     return [ob for ob in targets(context,source)
-            if ob.data.uv_layers.get(UV_NAME) is not None and ob.visible_get()
+            if not preserve_output_uv(ob) and ob.data.uv_layers.get(UV_NAME) is not None and ob.visible_get()
             and ob.library is None and ob.data.library is None]
 
 

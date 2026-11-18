@@ -9,7 +9,7 @@ import bpy
 import bpy.utils.previews
 from bpy.app.handlers import persistent
 from . import ownership, dev_tools, material_controls, ui_image_hints
-from . import effect_layout, generator_assets, baked_materials
+from . import effect_layout, generator_assets, baked_materials, wall_stack, boolean_stack
 from .apply_selected import PROJECT_DAMAGE_OT_apply_selected
 from .fracture_assets import TYPE_BY_ASSET, FRACTURE_KEYS, active_key
 
@@ -22,7 +22,7 @@ SOCIAL_LINKS = {
 }
 TUTORIAL_URL = 'https://www.youtube.com/playlist?list=PLbD5I1cRdfaU'
 
-                                                         
+
 EFFECTS = (
     ('edge','Edge Damage','chips_enable','MOD_BEVEL'),
     ('surface','Surface Damage','surf_enable','MOD_DISPLACE'),
@@ -31,7 +31,7 @@ EFFECTS = (
     ('fracture_through','Fracture Through','fract_through_enable','MOD_EXPLODE'),
     ('fracture_volume','Fracture Volume','fract_through_enable','MOD_EXPLODE'),
     ('buildup','Bead','build_enable','MOD_BUILD'),
-                                                                                       
+
     ('piles','Corner Piles','pile_enable','MESH_ICOSPHERE'),
     ('deposits','Deposits','deposit_enable','MOD_PARTICLES'),
     ('scratch','Scratches Draw','scratch_enable','GREASEPENCIL'),
@@ -126,13 +126,13 @@ EFFECTS += damage_generator_assets.ROWS
 CATALOG = {row[0]:row for row in EFFECTS}
 TILE_LABELS.update({row[0]:row[1] for row in damage_generator_assets.ROWS})
 REMOVED_EFFECTS={'heat','bevel','rust','glass_through','rbf','metal','fracture_volume','glass'}
-HIDDEN_EFFECTS={'brick','brick_v2','fabric_solid','hit_through','coating','glass_through','rbf','debris','wallhole','blast','fracture_through'}                                              
+HIDDEN_EFFECTS={'brick','brick_v2','fabric_solid','hit_through','coating','glass_through','rbf','debris','wallhole','blast','fracture_through'}
 HIDDEN_EFFECTS.update(damage_generator_assets.RETIRED_KEYS)
 ENABLE_PROPS={r[2] for r in EFFECTS}
 _SYNCING=False
 
-                                                                
-                                                                 
+
+
 from . import effect_categories
 EFFECT_CATEGORIES = effect_categories.CATEGORIES
 
@@ -144,7 +144,7 @@ TOOLS_CATEGORIES = (
     ('PERFORMANCE', 'Performance', 'Background calculation, CPU budget and caching'),
 )
 
-                                                                           
+
 EXTRA_EFFECT_TAGS = {}
 
 
@@ -203,9 +203,9 @@ def _browser_entries(category, query, revision):
         found.sort(key=lambda row: row[0] != 'cellf')
     return found
 
-                                                                             
-                                                                               
-                                                                             
+
+
+
 _PREVIEWS = None
 _PREVIEW_FILES = {}
 _PREVIEW_CACHE = {}
@@ -336,18 +336,21 @@ def _draw_thumbnail_browser(layout, wm, src):
         op.effect, op.action = effect, 'ADD'
     if variant:
         from . import boolean_break
-        can_remove = variant == boolean_break.variant(src.project_damage)
+        entry = boolean_break.variant_row(src, variant)
+        can_remove = entry is not None
     else:
         can_remove = True
     if can_remove and any(item.key == effect for item in src.project_damage_effects):
         op = row.operator('project_damage.effect_action', text='', icon='X')
         op.effect, op.action = effect, 'REMOVE'
+        if variant:
+            op.instance = entry.get(boolean_stack.INSTANCE, 0)
 
 
 def _draw_independent_generators(layout):
     box = layout.box()
     material_controls.centered_heading(box, 'Independent Generators', icon='OUTLINER_OB_MESH')
-    _draw_asset_grid(box, None, dev_tools.tiles(generator_assets.ASSETS+generator_assets.DUAL_ASSETS), full=True)
+    _draw_asset_grid(box, None, dev_tools.tiles(generator_assets.ASSETS), full=True)
     box.separator()
     note = box.column(align=True)
     for text in ('These generators work without', 'Add Project Damage.'):
@@ -389,7 +392,7 @@ def _draw_asset_grid(layout, src, entries, *, full, category='ALL', query=''):
         else:
             button.effect=key
             button.action='ADD'
-        if src is not None and any(item.key==key for item in src.project_damage_effects):
+        if src is not None and key not in wall_stack.KEYS and any(item.key==key for item in src.project_damage_effects):
             remove=button_row.operator('project_damage.effect_action',text='',icon='X')
             remove.effect=key
             remove.action='REMOVE'
@@ -400,7 +403,11 @@ def source(context):
     ob=ownership.context_source(context)
     return ob if ob is not None and ob.type=='MESH' and not ob.project_damage_breaker.is_breaker else None
 
-def enabled(src,key):
+def enabled(src,key,row=None):
+    if src is not None and key=='boolean' and row is not None and row.get(boolean_stack.INSTANCE):
+        return bool(row.get(boolean_stack.ON))
+    if src is not None and key in wall_stack.KEYS:
+        return wall_stack.row_enabled(src, row, key)
     if src is not None and key=='fabric':return bool(src.project_damage.fabric_enable or src.project_damage.fabric_solid_enable)
     if key=='fabric_solid':return False
     if key in generator_assets.KEYS or src is None:return False
@@ -422,12 +429,12 @@ def sync(src):
     if src is None or src.type!='MESH' or any(src.get(k) for k in ownership.STAMPS):return
     if baked_materials.is_applied(src):return
     dev_tools.apply_new_defaults(src)
-                                                                             
+
     p=src.project_damage
     desired_paint=p.wallpaper_drawing is not None
     if p.wallpaper_paint_enable!=desired_paint:p['wallpaper_paint_enable']=desired_paint
-                                                                             
-                                                                         
+
+
     from . import live
     applying=live._APPLYING;live._APPLYING=True
     try:
@@ -450,12 +457,12 @@ def sync(src):
             if src.project_damage_effects[first].key!='fabric':src.project_damage_effects[first].key='fabric'
             for i in reversed(fabric_rows[1:]):src.project_damage_effects.remove(i)
             if selected_fabric and src.project_damage_effect_index!=first:src.project_damage_effect_index=first
-        selected=(src.project_damage_effects[src.project_damage_effect_index].key
-                  if 0<=src.project_damage_effect_index<len(src.project_damage_effects) else None)
-        for i in reversed(range(len(src.project_damage_effects))):
-            if src.project_damage_effects[i].key in REMOVED_EFFECTS:src.project_damage_effects.remove(i)
-        if selected not in REMOVED_EFFECTS and selected is not None:
-            selected_index=next((i for i,row in enumerate(src.project_damage_effects) if row.key==selected),0)
+        index = src.project_damage_effect_index
+        removed = [i for i, row in enumerate(src.project_damage_effects) if row.key in REMOVED_EFFECTS]
+        for i in reversed(removed):
+            src.project_damage_effects.remove(i)
+        if removed:
+            selected_index = min(index - sum(i < index for i in removed), max(0, len(src.project_damage_effects)-1))
             if src.project_damage_effect_index!=selected_index:src.project_damage_effect_index=selected_index
     finally:live._APPLYING=applying
     if not src.get('project_damage_defaults_v2'):
@@ -467,14 +474,14 @@ def sync(src):
             src.project_damage_effect_index=0
         src['project_damage_defaults_v2']=True
     if not src.get('project_damage_worn_v2'):
-                                                                        
-                                                                          
-                                                              
+
+
+
         applying=live._APPLYING;live._APPLYING=True
         try:
             if p.build_enable and p.build_corner_prob>0.0:p.pile_enable=True
-                                                                        
-                                                    
+
+
             keys={row.key for row in src.project_damage_effects}
             if p.deposit_enable and not p.build_enable and 'buildup' in keys and not keys&{'piles','deposits'}:
                 p.deposit_enable=False
@@ -504,14 +511,16 @@ def sync(src):
 @persistent
 def sync_scene(*unused):
     global _SYNCING
-    from . import live
+    from . import gpu_ui, live
     if live._HISTORY_RESTORING:
         return
     if _SYNCING or not hasattr(bpy.data,'objects') or not hasattr(bpy.types.Object,'project_damage_effects'):return
     _SYNCING=True
     try:
-        active=getattr(bpy.context,'active_object',None)
-        current=ownership.source_of(active) if hasattr(bpy.types.Object,'project_damage_og_object') else active
+        window=bpy.context.window
+        current=None
+        if window is not None and any(gpu_ui.sidebar_visible(area) for area in window.screen.areas):
+            current=ownership.source_of(getattr(bpy.context,'active_object',None))
         depsgraph=unused[1] if len(unused)==2 and isinstance(unused[1],bpy.types.Depsgraph) else None
         baked_materials.invalidate(depsgraph)
         if depsgraph is not None:
@@ -522,9 +531,13 @@ def sync_scene(*unused):
         else:
             candidates=bpy.data.objects
         for ob in candidates:
-            if (ob.type=='MESH' and not ob.project_damage_breaker.is_breaker
-                    and (ob==current or ob.get('project_damage_uid') or len(ob.project_damage_effects))):sync(ob)
+            if (ob.type=='MESH' and (ob.get('project_damage_uid') or len(ob.project_damage_effects)
+                    or (ob==current and not ob.get('project_damage_worn_v2')))
+                    and not ob.project_damage_breaker.is_breaker):sync(ob)
     finally:_SYNCING=False
+
+SURFACE_STARTER_CRATERS=5
+
 
 def set_enabled(src,key,on):
     from . import background_compute
@@ -537,6 +550,11 @@ def set_enabled(src,key,on):
             fracture_stack.set_enabled(src,key,on)
             live._mark_dirty(src)
             return
+        if on and key=='surface' and not src.project_damage.surf_enable:
+            # a new Surface Damage starts with visible craters (Crater Count 0 did nothing);
+            # only values never set are touched, so saved files and presets stay as they were
+            if not src.project_damage.is_property_set('surf_amount'):
+                src.project_damage.surf_amount=SURFACE_STARTER_CRATERS
         if on and key=='bullet':
             from . import damage_physics
             physics=damage_physics.settings(src)
@@ -555,7 +573,7 @@ def set_enabled(src,key,on):
             variant_defaults.switch(src,key)
         if key not in {'fabric','fabric_solid'}:setattr(src.project_damage,CATALOG[key][2],on)
         if on and key in {'concrete','concrete_v2','pipes','cables'}:
-                                                                                
+
             src.project_damage.concrete_enable = key == 'concrete'
             src.project_damage.concrete_v2_enable = key == 'concrete_v2'
             src.project_damage.pipe_damage_enable = key == 'pipes'
@@ -566,7 +584,7 @@ def set_enabled(src,key,on):
                 setattr(src.project_damage, base + '_enable', key == base)
                 setattr(src.project_damage, base + '_v2_enable', key == base + '_v2')
         if on and key in {'lath', 'lath_v2', 'lath_riven', 'lath_framing'}:
-                                                                           
+
             if key == 'lath_riven':
                 from . import riven_lath
                 riven_lath.apply_look(src)
@@ -608,6 +626,7 @@ class PROJECT_DAMAGE_OT_effect_action(bpy.types.Operator):
     bl_options={'REGISTER','UNDO'}
     bl_description='Add/select, hide, remove or evaluate an effect; original mesh stays editable'
     effect: bpy.props.StringProperty()
+    instance: bpy.props.IntProperty(options={'HIDDEN', 'SKIP_SAVE'})
     action: bpy.props.EnumProperty(items=tuple((k,k.title(),'') for k in ('ADD','TOGGLE','REMOVE','APPLY')))
     @classmethod
     def poll(cls,context):return source(context) is not None and context.mode=='OBJECT'
@@ -621,7 +640,7 @@ class PROJECT_DAMAGE_OT_effect_action(bpy.types.Operator):
         rows = src.project_damage_effects
         index = src.project_damage_effect_index
         key = self.effect or (rows[index].key if 0 <= index < len(rows) else '')
-        if self.action in {'ADD', 'APPLY'} and background_compute.confirm_effect(context, src, key, self.action):
+        if self.action in {'ADD', 'APPLY'} and background_compute.confirm_effect(context, src, key, self.action, instance=self.instance):
             return {'CANCELLED'}
         return self.execute(context)
 
@@ -633,7 +652,14 @@ class PROJECT_DAMAGE_OT_effect_action(bpy.types.Operator):
         if key in {'paper_generator', *damage_generator_assets.KINDS} and not initialized(context):
             self.report({'WARNING'}, 'Use Add Project Damage on a mesh before adding this generator')
             return {'CANCELLED'}
-        index=next((i for i,r in enumerate(rows) if r.key==key),None)
+        if key=='boolean':
+            if self.action=='ADD':
+                return bpy.ops.project_damage.boolean_variant_add(variant='SIMPLE')
+            if boolean_stack.SERIAL in src:
+                return self.execute_boolean(context,src)
+        index=wall_stack.chosen_index(src,key,self.instance)
+        if key in wall_stack.KEYS and (self.action == 'ADD' or wall_stack.SERIAL in src):
+            return self.execute_wall(context, src, key, index)
         fresh=index is None
         if self.action in {'ADD','APPLY'}:
             if key=='foam' and self.action=='ADD':
@@ -682,7 +708,7 @@ class PROJECT_DAMAGE_OT_effect_action(bpy.types.Operator):
             from .build import PROJECT_DAMAGE_OT_update
             if not PROJECT_DAMAGE_OT_update.poll(context):return {'CANCELLED'}
             return bpy.ops.project_damage.update()
-                                                                                            
+
         from . import build
         if self.action in {'TOGGLE','REMOVE'} and build.result_of(src) is not None:
             from . import live
@@ -693,6 +719,68 @@ class PROJECT_DAMAGE_OT_effect_action(bpy.types.Operator):
             if result is None:return {'CANCELLED'}
         return {'FINISHED'}
 
+    def execute_boolean(self, context, source):
+        from . import background_compute, build, live
+        background_compute.cancel(source)
+        index = boolean_stack.chosen_index(source, self.instance)
+        if index is None:
+            return {'CANCELLED'}
+        row = source.project_damage_effects[index]
+        if self.action == 'REMOVE':
+            boolean_stack.remove(source, index)
+        elif self.action == 'APPLY':
+            source.project_damage_effect_index = index
+            boolean_stack.select(source, row)
+            row[boolean_stack.ON] = True
+        else:
+            row[boolean_stack.ON] = not row.get(boolean_stack.ON)
+        boolean_stack.refresh_master(source)
+        live.invalidate_index()
+        live._mark_dirty(source)
+        if build.result_of(source) is None:
+            return {'FINISHED'}
+        result, reports = build.rebuild_object(context, source)
+        for level, message in reports:
+            self.report(level, message)
+        return {'FINISHED'} if result is not None else {'CANCELLED'}
+
+    def execute_wall(self, context, source, key, index):
+        from . import background_compute, build, live, paint
+        background_compute.cancel(source)
+        if self.action == 'ADD':
+            if boolean_stack.SERIAL in source:
+                boolean_stack.select(source, None)
+            wall_stack.add(source, key)
+            paint.begin_new_effect(context, source, key)
+            live.invalidate_index()
+            live._mark_dirty(source)
+            return {'FINISHED'}
+        rows = source.project_damage_effects
+        if index is None or not rows[index].get(wall_stack.INSTANCE):
+            return {'CANCELLED'}
+        row = rows[index]
+        if self.action == 'APPLY':
+            source.project_damage_effect_index = index
+            wall_stack.select(source, row)
+            row[wall_stack.ON] = True
+            wall_stack.set_flags(source, row)
+            return bpy.ops.project_damage.update()
+        if self.action == 'REMOVE':
+            wall_stack.remove(source, index)
+        else:
+            row[wall_stack.ON] = not row.get(wall_stack.ON)
+            if row == wall_stack.edited(source):
+                wall_stack.set_flags(source, row)
+        live.invalidate_index()
+        live._mark_dirty(source)
+        if build.result_of(source) is None:
+            return {'FINISHED'}
+        result, reports = build.rebuild_object(context, source)
+        for kind, message in reports:
+            self.report(kind, message)
+        return {'FINISHED'} if result is not None else {'CANCELLED'}
+
+
 class PROJECT_DAMAGE_UL_effects(bpy.types.UIList):
     def draw_item(self,context,layout,data,item,icon,active_data,active_prop,index=0,flt_flag=0):
         src=data;key=item.key
@@ -700,21 +788,25 @@ class PROJECT_DAMAGE_UL_effects(bpy.types.UIList):
         _,label,_,image=CATALOG[key]
         if key=='boolean':
             from . import boolean_break
-            label=boolean_break.variant_label(src)
+            label=boolean_break.variant_label(src,item)
         row=layout.row(align=True)
-        row.label(text=dev_tools.effect_name(key,label),icon=image)
-        button=row.operator('project_damage.effect_action',text='',icon='HIDE_OFF' if enabled(src,key) else 'HIDE_ON',emboss=False);button.effect=key;button.action='TOGGLE'
-                                                                   
+        serial = item.get(boolean_stack.INSTANCE, 0) if key=='boolean' else item.get(wall_stack.INSTANCE, 0)
+        title = dev_tools.effect_name(key, label)
+        if serial:
+            title += f" #{serial}"
+        row.label(text=title,icon=image)
+        button=row.operator('project_damage.effect_action',text='',icon='HIDE_OFF' if enabled(src,key,item) else 'HIDE_ON',emboss=False);button.effect=key;button.action='TOGGLE';button.instance=serial
+
         row.operator_context = 'INVOKE_DEFAULT'
-        button=row.operator('project_damage.effect_action',text='',icon='FILE_REFRESH',emboss=False);button.effect=key;button.action='APPLY'
-        row.operator('project_damage.apply_selected',text='',icon='CHECKMARK',emboss=False).effect=key
-        button=row.operator('project_damage.effect_action',text='',icon='X',emboss=False);button.effect=key;button.action='REMOVE'
+        button=row.operator('project_damage.effect_action',text='',icon='FILE_REFRESH',emboss=False);button.effect=key;button.action='APPLY';button.instance=serial
+        button=row.operator('project_damage.apply_selected',text='',icon='CHECKMARK',emboss=False);button.effect=key;button.instance=serial
+        button=row.operator('project_damage.effect_action',text='',icon='X',emboss=False);button.effect=key;button.action='REMOVE';button.instance=serial
 
 class _Panel(bpy.types.Panel):
     bl_space_type='VIEW_3D';bl_region_type='UI';bl_category="⚒ Project Damage";bl_options=set()
     @classmethod
     def poll(cls,context):
-        return True                                                               
+        return True
 
 def draw_target_header(layout,context,source_override=...,show_pin=True):
     src=source(context) if source_override is ... else source_override
@@ -749,8 +841,8 @@ def import_source(context):
 
 
 # раздел «Import Project Damage»
-class OBJECT_PT_project_damage(_Panel):
-    bl_idname='OBJECT_PT_project_damage';bl_label='Import Project Damage';bl_order=0
+class OBJECT_PT_project_damage_ordered(_Panel):
+    bl_idname='OBJECT_PT_project_damage_ordered';bl_label='Import Project Damage';bl_order=0
 
     @classmethod
     def poll(cls,context):
@@ -903,7 +995,7 @@ class _Layout:
         if prop is not None and prop.type=='ENUM':
             kwargs['expand']=True
             kwargs.pop('icon_only',None)
-                                                                                 
+
             if not kwargs.get('text','').strip():kwargs.pop('text',None)
             target=target.row(align=True)
             target.scale_y=effect_layout.SELECTOR_HEIGHT
@@ -942,8 +1034,8 @@ PHYSICS_MODULES = {'dbevel':'dbevel','erosion':'erosion',
     'buildup':'bead', 'piles':'piles', 'deposits':'deposits',
     'bullet':'bullet', 'hang':'hang', 'boolean':'boolean',
 }
-                                                                           
-                                                                        
+
+
 PHYSICS_KEYS = set(PHYSICS_MODULES) | {'glass_hit','glass_drawn','cellf'}
 HIDDEN_PHYSICS_TABS = {'glass_hit', 'glass_drawn', 'erosion', 'buildup', 'piles', 'deposits'}
 PHYSICS_TAB_KEYS = PHYSICS_KEYS - HIDDEN_PHYSICS_TABS
@@ -967,8 +1059,12 @@ def draw_physics(layout, context, src, key):
     elif key in {'glass_hit','glass_drawn'}:
         panels.draw_glass_pieces(layout, src.project_damage, context)
     elif key == 'cellf':
+        from . import uv_zones
+        from .material_library import draw_property
         box=layout.box();material_controls.centered_heading(box,'Fracture Type',icon='MOD_EXPLODE')
         box.prop(src.project_damage,'cellf_material',text='Fracture Type',expand=True)
+        draw_property(box, src.project_damage, 'cellf_inner_material', text='Inside Faces')
+        uv_zones.draw_inside_uv(box, context)
         damage_physics.draw_quick_physics(layout, context)
 
 def _draw_effect_original(layout,context,key,raw=False):
@@ -1053,7 +1149,7 @@ def _draw_effect_original(layout,context,key,raw=False):
         if hasattr(cls,'effect_fields'):
             fields=effect_layout.group_fields(source(context).project_damage,cls.effect_module,cls.effect_fields)
             if not fields:continue
-                                                                          
+
         inline_noise='noise' in cls.bl_label.casefold() or 'noise' in cls.__name__.casefold()
         target=layout if i==0 or inline_noise else fold(layout,'effect_'+key+'_'+str(i),cls.bl_label)
         if i==0 and key=='boolean':
@@ -1133,9 +1229,10 @@ class PROJECT_DAMAGE_OT_send_feedback(bpy.types.Operator):
 
 
 # раздел «Info and Documentation»
-class OBJECT_PT_project_damage_info(_Panel):
+class OBJECT_PT_project_damage_info_ordered(_Panel):
     bl_label = 'Info and Documentation'
-    bl_order = 5
+    bl_idname = 'OBJECT_PT_project_damage_info_ordered'
+    bl_order = 3
     bl_options = {'DEFAULT_CLOSED'}
 
     @classmethod
@@ -1163,8 +1260,8 @@ class OBJECT_PT_project_damage_info(_Panel):
 
 
 # раздел «Tools»
-class OBJECT_PT_project_damage_tools(_Panel):
-    bl_idname='OBJECT_PT_project_damage_tools';bl_label='Tools';bl_order=4
+class OBJECT_PT_project_damage_tools_ordered(_Panel):
+    bl_idname='OBJECT_PT_project_damage_tools_ordered';bl_label='Tools';bl_order=2
 
     def draw_header(self, context):
         self.layout.label(text='', icon='TOOL_SETTINGS')
@@ -1179,7 +1276,7 @@ class OBJECT_PT_project_damage_tools(_Panel):
         if src is None:return
         p=src.project_damage
         category=context.window_manager.project_damage_tools_category
-        if category=='MASKS':category='PREP'                                                                
+        if category=='MASKS':category='PREP'
         navigation = layout.column(align=True)
         tabs=navigation.row(align=True);tabs.scale_y=1.5
         for key,title,_ in TOOLS_CATEGORIES:
@@ -1201,8 +1298,8 @@ class OBJECT_PT_project_damage_tools(_Panel):
         body=layout.column(align=True)
         body.use_property_split=True;body.use_property_decorate=False
         if category=='PREP':
-                                                                             
-                                                                                
+
+
             panels.draw_mesh_preparation_tools(SimpleNamespace(layout=body),context)
         elif category=='CLEANUP':
             panels.draw_cleanup_tools(body,context)
@@ -1240,8 +1337,8 @@ def draw_update_controls(layout, p):
 
 
 # раздел «Settings | Project Damage»
-class OBJECT_PT_project_damage_settings(_Panel):
-    bl_label='Settings | Project Damage';bl_order=3
+class OBJECT_PT_project_damage_settings_ordered(_Panel):
+    bl_idname='OBJECT_PT_project_damage_settings_ordered';bl_label='Settings | Project Damage';bl_order=1
 
     def draw_header(self, context):
         self.layout.label(text='', icon='MODIFIER')
@@ -1302,13 +1399,14 @@ class OBJECT_PT_project_damage_settings(_Panel):
                 tabs.prop_enum(context.window_manager,'project_damage_ui_section','PHYSICS',text='Separate' if selected_key in {'piles','deposits'} else 'Physics',icon='MOD_EXPLODE' if selected_key in {'piles','deposits'} else 'PHYSICS')
         rows=src.project_damage_effects
         if rows:
-            key=rows[min(src.project_damage_effect_index,len(rows)-1)].key
+            selected = rows[min(src.project_damage_effect_index,len(rows)-1)]
+            key = selected.key
             if key in CATALOG:
                 from . import editorial
                 geometry=growth_only or not ((section=='PHYSICS' and key in PHYSICS_TAB_KEYS) or (section=='MATERIAL' and material_controls.has_materials(key)))
                 with editorial.scope(key,src,active=geometry):
                     material_controls.centered_heading(layout,dev_tools.effect_name(key,CATALOG[key][1]),icon=CATALOG[key][3])
-                    if not enabled(src,key):layout.label(text='Hidden — settings are kept',icon='HIDE_ON')
+                    if not enabled(src,key,selected):layout.label(text='Hidden — settings are kept',icon='HIDE_ON')
                     if growth_only:draw_effect(layout,context,key)
                     elif section=='PHYSICS' and key in PHYSICS_TAB_KEYS:
                         draw_physics(layout,context,src,key)
@@ -1341,10 +1439,26 @@ class _GlobalLayout(_Layout):
         if name in {'global_scale','global_detail','draft_enable','draft_quality','seed','all_off','topology','keep_uvs','keep_selections'}:return
         return super().prop(owner,name,**kwargs)
 
-CLASSES=(baked_materials.PROJECT_DAMAGE_OT_baked_sides_material,baked_materials.PROJECT_DAMAGE_OT_baked_new_material,baked_materials.PROJECT_DAMAGE_UL_baked_groups,generator_assets.PROJECT_DAMAGE_OT_add_generator_asset,*dev_tools.CLASSES,material_controls.PROJECT_DAMAGE_OT_material_all,ProjectDamageEffectEntry,PROJECT_DAMAGE_OT_effect_action,PROJECT_DAMAGE_OT_apply_selected,PROJECT_DAMAGE_UL_effects,
-         PROJECT_DAMAGE_OT_import_section,PROJECT_DAMAGE_OT_open_info_link,PROJECT_DAMAGE_OT_send_feedback,OBJECT_PT_project_damage,
-         OBJECT_PT_project_damage_settings,OBJECT_PT_project_damage_tools,OBJECT_PT_project_damage_info,
+CLASSES=(baked_materials.PROJECT_DAMAGE_OT_baked_sides_material,baked_materials.PROJECT_DAMAGE_OT_baked_new_material,baked_materials.PROJECT_DAMAGE_UL_baked_groups,generator_assets.PROJECT_DAMAGE_OT_add_generator_asset,generator_assets.PROJECT_DAMAGE_OT_delete_generator_asset,*dev_tools.CLASSES,material_controls.PROJECT_DAMAGE_OT_material_all,ProjectDamageEffectEntry,PROJECT_DAMAGE_OT_effect_action,PROJECT_DAMAGE_OT_apply_selected,PROJECT_DAMAGE_UL_effects,
+         PROJECT_DAMAGE_OT_import_section,PROJECT_DAMAGE_OT_open_info_link,PROJECT_DAMAGE_OT_send_feedback,OBJECT_PT_project_damage_ordered,
+         OBJECT_PT_project_damage_settings_ordered,OBJECT_PT_project_damage_tools_ordered,OBJECT_PT_project_damage_info_ordered,
          dev_tools.OBJECT_PT_project_damage_dev_tools)
+def effect_index_changed(source, context):
+    from . import fracture_stack, live
+    if live._HISTORY_RESTORING:
+        return
+    i = source.project_damage_effect_index
+    rows = source.project_damage_effects
+    row = rows[i] if i < len(rows) else None
+    if boolean_stack.SERIAL in source and (row is None or row.key!='boolean'):
+        boolean_stack.select(source, None)
+    if wall_stack.SERIAL in source:
+        wall_stack.select(source, row)
+    if row is not None and row.key=='boolean' and boolean_stack.SERIAL in source:
+        boolean_stack.select(source, row)
+    fracture_stack.index_changed(source, context)
+
+
 def _registered_class(cls):
     """Find the actual RNA class, including one from before importlib.reload."""
     for base in (bpy.types.Panel, bpy.types.Operator, bpy.types.UIList,
@@ -1356,7 +1470,7 @@ def _registered_class(cls):
 
 # подключаем свойства и действия этого модуля к Blender
 def register():
-                                                                               
+
     if any(_registered_class(cls) is not None for cls in CLASSES):
         unregister()
     legacy=bpy.types.Panel.bl_rna_get_subclass_py('OBJECT_PT_project_damage_presets',None)
@@ -1412,9 +1526,9 @@ def register():
     dev_tools.register_state()
     bpy.types.Object.project_damage_effects=bpy.props.CollectionProperty(type=ProjectDamageEffectEntry)
     from . import fracture_stack
-    bpy.types.Object.project_damage_effect_index=bpy.props.IntProperty(default=0,min=0,update=fracture_stack.index_changed)
+    bpy.types.Object.project_damage_effect_index=bpy.props.IntProperty(default=0,min=0,update=effect_index_changed)
     bpy.app.handlers.load_post.append(sync_scene);bpy.app.handlers.depsgraph_update_post.append(sync_scene)
-                                                                             
+
     if hasattr(bpy.data,'objects'):sync_scene()
     elif not bpy.app.timers.is_registered(_sync_once):bpy.app.timers.register(_sync_once,first_interval=.01)
 # убираем подключения модуля при выключении аддона
@@ -1423,7 +1537,7 @@ def unregister():
     _PREVIEW_CACHE.clear()
     _browser_entries.cache_clear()
     global _PREVIEWS
-                                                                            
+
     if bpy.app.timers.is_registered(_sync_once):
         bpy.app.timers.unregister(_sync_once)
     for handlers in (bpy.app.handlers.load_post, bpy.app.handlers.depsgraph_update_post):
@@ -1435,7 +1549,7 @@ def unregister():
         try:
             bpy.utils.previews.remove(_PREVIEWS)
         except (ReferenceError, KeyError):
-            pass                                                                 
+            pass
         _PREVIEWS = None
     _PREVIEW_FILES.clear()
     for key in ('pipe','cable'):

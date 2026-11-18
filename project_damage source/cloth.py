@@ -481,6 +481,11 @@ class PROJECT_DAMAGE_PT_cloth_sheets(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         s = settings(context)
+        from . import effect_layout
+        owner = owner_of(context.active_object)
+        existing = _result(s, owner, context.active_object)
+        effect_layout.standalone_update(layout, s, 'project_damage.cloth_sheets',
+                                        label='Manual Update' if existing else 'Generate Cloth Sheets')
         from .material_controls import centered_heading
         box = layout.box()
         centered_heading(box, 'Quality', 'PREFERENCES')
@@ -490,7 +495,6 @@ class PROJECT_DAMAGE_PT_cloth_sheets(bpy.types.Panel):
         column.prop(s, 'smooth')
         column.prop(s, 'seed')
         column = layout.column()
-        owner = owner_of(context.active_object)
         if owner is None:ui_image_hints.prop(column,s, 'source')
         if s.source == 'EMPTIES':
             ui_image_hints.prop(column,s, 'empties')
@@ -501,14 +505,6 @@ class PROJECT_DAMAGE_PT_cloth_sheets(bpy.types.Panel):
                 column.label(text='to reposition the cloth.')
         column.prop(s, 'sheet_type')
         column.prop(s, 'colliders')
-        existing = _result(s, owner, context.active_object)
-        live=layout.row(align=True);live.scale_y=1.3
-        live.prop(s,'live_update',text='Live Update',toggle=True,icon='FILE_REFRESH')
-        action = layout.row()
-        action.scale_y = 1.4
-        action.operator('project_damage.cloth_sheets',
-                        text='Update Cloth Sheets' if existing else 'Generate Cloth Sheets',
-                        icon='FILE_REFRESH' if existing else 'MOD_CLOTH')
         from .material_controls import centered_heading
         box = layout.box()
         centered_heading(box, 'Sheets', 'MOD_CLOTH')

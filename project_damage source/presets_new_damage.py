@@ -65,6 +65,7 @@ def inputs(source,key,context,additive=False):
     if key=='GLASS_PELLET_CLUSTER':positions=[(-.16,.15),(.1,.2),(.22,-.05),(-.07,-.2),(-.23,-.05)]
     if key in {'GLASS_EDGE_STRIKE','GLASS_DRAW_TORN_CORNER'}:positions=[(-.32,.3)]
     if key=='GLASS_DRAW_EDGE_SCALLOPS':positions=[(.38,-.27),(.38,0),(.38,.26)]
+    from . import guide_timing
     if 'DRAW_' in key:
         gp=bpy.data.grease_pencils.new(source.name+' · Preset Glass Drawing')
         obj=bpy.data.objects.new(gp.name,gp);context.scene.collection.objects.link(obj)
@@ -74,7 +75,7 @@ def inputs(source,key,context,additive=False):
             ink=bpy.data.materials.new('Project Damage Preset Glass Ink');bpy.data.materials.create_gpencil_data(ink)
             ink.grease_pencil.color=(.05,.5,1,.85)
         gp.materials.append(ink)
-        layer=gp.layers.new('Damage Contours',set_active=True);drawing=layer.frames.new(context.scene.frame_current).drawing
+        layer=gp.layers.new('Damage Contours',set_active=True);drawing=layer.frames.new(guide_timing.FRAME).drawing
         drawing.add_strokes([36]*len(positions))
         coords=[]
         radius={'GLASS_DRAW_TORN_CORNER':.23,'GLASS_DRAW_LONG_GASH':.22,'GLASS_DRAW_TWIN_OPENINGS':.16,'GLASS_DRAW_CENTRAL_BREACH':.29,'GLASS_DRAW_EDGE_SCALLOPS':.16}[key]

@@ -39,6 +39,11 @@ def output(source):
     return next((ob for ob in source.children if ob.get('pd_structure_output')),None)
 
 
+def output_aligned(target):
+    identity = Matrix.Identity(4)
+    return target.matrix_parent_inverse == identity and target.matrix_basis == identity
+
+
 def changed_property(self,context):
     source=self.id_data
     if not _busy and not _history_restoring and not _frame_changing and source.pd_structure.live_update:queue(source)
@@ -127,6 +132,10 @@ class PDStructureSettings(bpy.types.PropertyGroup):
     gap:bpy.props.FloatProperty(name='Joint Gap',default=.01,min=0,soft_max=.05,subtype='DISTANCE',update=changed_property)
     axes:bpy.props.EnumProperty(name='Direction',items=[('VERTICAL','Vertical','Along the local surface height'),('HORIZONTAL','Horizontal','Across the local surface'),('BOTH','Both','Two crossing sets')],default='BOTH',update=changed_property)
     resolution:bpy.props.FloatProperty(name='Resolution',default=100,min=0,max=200,subtype='PERCENTAGE',update=changed_property,description='0% uses four-sided tubes and minimum segments; 100% uses the full profile and smooth damage bends; 200% adds samples')
+    master_scale:bpy.props.FloatProperty(name='Master Scale',default=100.,min=10.,max=400.,subtype='PERCENTAGE',update=changed_property,
+        description='Scale member dimensions, spacing and damage distances together. 10% uses one tenth of the set dimensions, 100% uses the set dimensions, and 400% uses four times those dimensions. The control mesh keeps its size')
+    single_edge_members:bpy.props.BoolProperty(name='Single-Edge Members',default=True,update=changed_property,
+        description='Use loose mesh edges as guides. Rebars also follows connected chains and branches')
     seed:bpy.props.IntProperty(name='Seed',default=0,min=0,update=changed_property,description='Varies the break boundary near damage handles')
     points:bpy.props.CollectionProperty(type=PDStructurePoint)
     drawing:bpy.props.PointerProperty(name='Damage Drawing',type=bpy.types.Object,poll=lambda self,obj:obj.type in {'GREASEPENCIL','GPENCIL'},update=changed_property,description='Grease Pencil strokes defining damage bands on the control plane; visible layers at the current frame are used')
@@ -190,8 +199,12 @@ def point_states(source):
 
 def state(source):
     digest=hashlib.blake2b(digest_size=16)
+    settings=source.pd_structure
     with control_mesh(source) as mesh:
-        for data,field,width,dtype in ((mesh.vertices,'co',3,np.float32),(mesh.loops,'vertex_index',1,np.int32),(mesh.polygons,'loop_total',1,np.int32)):
+        fields=((mesh.vertices,'co',3,np.float32),(mesh.loops,'vertex_index',1,np.int32),(mesh.polygons,'loop_total',1,np.int32))
+        if settings.single_edge_members:
+            fields+=((mesh.edges,'vertices',2,np.int32),)
+        for data,field,width,dtype in fields:
             values=np.empty(len(data)*width,dtype=dtype);data.foreach_get(field,values);digest.update(values.tobytes())
     points=point_states(source)
     drawing=source.pd_structure.drawing
@@ -202,7 +215,6 @@ def state(source):
         matrix=input_matrix(source,drawing)
         drawing_matrix=matrix_values(matrix)
         signature=live_input_state.signature(drawing,matrix=matrix)
-    settings=source.pd_structure
     parameters=tuple((prop.identifier,getattr(settings,prop.identifier)) for prop in settings.bl_rna.properties if prop.type in {'FLOAT','INT','BOOLEAN','ENUM','STRING'} and prop.identifier not in {'rna_type','name','live_update','nail_length_cm'})
     if settings.kind=='BRICK':
         from . import structure_bricks
@@ -240,7 +252,7 @@ def tick():
         if target.mode!='OBJECT':continue
         _pending.discard(name);_due.pop(name,None);_queued_ids.pop(name,None)
         try:
-            if _states.get(source.session_uid)!=state(source):rebuild(source)
+            if not output_aligned(target) or _states.get(source.session_uid)!=state(source):rebuild(source)
         except Exception:
             import traceback;traceback.print_exc()
     return .1 if _pending else None
@@ -266,8 +278,9 @@ def deps_changed(scene,depsgraph):
         previous=_states.get(source.session_uid)
         links_changed=previous is None or previous[-1]!=references(source)
         mesh_changed=source in geometry or source.data in geometry
-        # в Object Mode двигается готовый результат, пересобирать его не нужно
-        if source.mode=='OBJECT' and source in transforms:mesh_changed=False
+        # Changing Origin can update both the object and the mesh in one event.
+        target=output(source)
+        alignment_changed=source in transforms and target is not None and not output_aligned(target)
         drawing=source.pd_structure.drawing if source.pd_structure.draw_damage else None
         drawing_updated=False
         if drawing is not None:
@@ -281,7 +294,7 @@ def deps_changed(scene,depsgraph):
                 old=previous[3][1] if previous and isinstance(previous[3],tuple) else None
                 drawing_updated|=old!=structure_bricks.input_state(source)
         points_updated=any(p.obj in updates for p in source.pd_structure.points) and (previous is None or previous[1]!=point_states(source))
-        if links_changed or drawing_updated or mesh_changed or points_updated:
+        if links_changed or drawing_updated or mesh_changed or points_updated or alignment_changed:
             if name not in _pending:queue(source)
     if pruned:
         valid={obj.session_uid for name in _sources if (obj:=bpy.data.objects.get(name)) is not None}
@@ -305,6 +318,71 @@ def commit_mesh(target,mesh):
     finally:bm.free()
     existing.update();existing.update_tag();target.update_tag(refresh={'DATA'})
     bpy.data.meshes.remove(mesh)
+
+
+def isolated_edges(mesh):
+    if not len(mesh.edges):
+        return []
+    indices=np.empty((len(mesh.edges),2),np.int32)
+    mesh.edges.foreach_get('vertices',indices.ravel())
+    # Two degree-one endpoints make a complete single-edge island.
+    degree=np.bincount(indices.ravel(),minlength=len(mesh.vertices))
+    return [(mesh.vertices[int(a)].co.copy(),mesh.vertices[int(b)].co.copy())
+            for a,b in indices[np.all(degree[indices]==1,axis=1)]]
+
+
+def surviving_runs(a,b,step,keep,*,knots=()):
+    steps=max(2,min(2000,math.ceil((b-a)/step)))
+    samples=[a+(b-a)*i/steps for i in range(steps+1)]
+    if knots:
+        samples=sorted(set(samples).union(knots))
+    flags=[keep(t) for t in samples]
+    run=[]
+    for i,t in enumerate(samples):
+        if i and flags[i]!=flags[i-1]:
+            lo,hi=samples[i-1],t
+            for _ in range(16):
+                middle=(lo+hi)/2
+                if keep(middle)==flags[i-1]:lo=middle
+                else:hi=middle
+            boundary=(lo+hi)/2
+            if flags[i]:
+                run=[boundary]
+            else:
+                run.append(boundary)
+                if len(run)>1:yield run
+                run=[]
+        if flags[i]:run.append(t)
+    if len(run)>1:yield run
+
+
+def edge_normal(tangent):
+    normal=Vector((0,-1,0) if abs(tangent.y)<.99 else (0,0,1))
+    return (normal-tangent*normal.dot(tangent)).normalized()
+
+
+def edge_runs(edges, metric, damage, amount, bend, step):
+    for a,b in edges:
+        if metric is not None:
+            a,b=metric@a,metric@b
+        delta=b-a
+        length=delta.length
+        if length<=1e-8:continue
+        tangent=delta/length
+        normal=edge_normal(tangent)
+        if not damage.base.parts:
+            yield [a,b],normal,False,False
+            continue
+        def keep(t):return damage.ratio(a+tangent*t)>=amount
+        for samples in surviving_runs(0.,length,step,keep):
+            if samples[-1]-samples[0]<=1e-8:continue
+            centers=[]
+            for t in samples:
+                center=a+tangent*t
+                ratio=damage.ratio(center)
+                if ratio<1:center+=normal*((1-ratio*ratio)**2*bend)
+                centers.append(center)
+            yield centers,normal,samples[0]>1e-8,samples[-1]<length-1e-8
 
 
 # обновляем конструкцию по текущей форме управляющего меша
@@ -333,8 +411,12 @@ def rebuild(source):
         else:
             scale=max(1e-8,sum(source.matrix_world.to_scale())/3)
             unit/=scale
+        uv_unit=unit
+        unit*=p.master_scale/100.
         spacing=p.spacing*unit;width=p.width*unit;depth=p.thickness*unit;radius=p.radius*unit;gap=p.gap*unit
         damage_r=p.damage_radius*unit
+        quality=max(.08,p.resolution/100)
+        step=max(.003*unit,min(spacing/3,.03*unit,p.drawing_radius*unit/4,damage_r/4))/quality
         centers=[inv@item.obj.matrix_world.translation for item in p.points if item.enabled and item.obj]
         strokes=structure_drawing.paths(source)
         if metric is not None:
@@ -346,6 +428,13 @@ def rebuild(source):
         from . import structure_surface_map,structure_wood
         clearance=max(depth,p.support_depth*unit,p.width*unit*.5) if p.kind in {'LATH','STUD'} else radius*2
         with control_mesh(source) as control:
+            paths=[]
+            edges=[]
+            if p.single_edge_members:
+                if p.kind=='REBAR':
+                    paths=list(structure_rebar.custom_paths(control))
+                else:
+                    edges=isolated_edges(control)
             if metric is None:charts=structure_surface_map.charts(control,clearance)
             else:
                 metric_mesh=control.copy()
@@ -360,6 +449,9 @@ def rebuild(source):
             loose_strokes=structure_bricks.loose_paths(source)
             if metric is not None:loose_strokes=[[metric@Vector(q) for q in path] for path in loose_strokes]
             loose_field=structure_drawing.DamageField([],1.,loose_strokes,p.brick_loose_radius*unit)
+            charts.extend(structure_bricks.edge_chart(metric@a, metric@b, p, unit)
+                          for a,b in edges if (metric@(b-a)).length > 1e-6)
+            edges=[]
             for chart in charts:
                 points,polygons,mats,ids,flat=structure_bricks.generate(p,chart,damage,unit,loose_field)
                 off=len(verts);base=max(pieces,default=-1)+1
@@ -382,28 +474,8 @@ def rebuild(source):
                         def surface(t,offset=0):return chart.sample(x if axis==0 else t,t if axis==0 else x,offset)
                         amount=p.break_amount/100
                         for a,b in chart.intervals(axis,x):
-                            quality=max(.08,p.resolution/100)
-                            step=max(.003*unit,min(spacing/3,.03*unit,p.drawing_radius*unit/4,damage_r/4))/quality
-                            steps=max(2,min(2000,math.ceil((b-a)/step)))
-                            ts=[a+(b-a)*k/steps for k in range(steps+1)]
                             def keep(t):return damage.ratio(surface(t)[0])>=amount
-                            flags=[keep(t) for t in ts];runs=[];run=[]
-                            for i,t in enumerate(ts):
-                                if i and flags[i]!=flags[i-1]:
-                                    lo,hi=ts[i-1],t
-                                    for _ in range(16):
-                                        middle=(lo+hi)/2
-                                        if keep(middle)==flags[i-1]:lo=middle
-                                        else:hi=middle
-                                    boundary=(lo+hi)/2
-                                    if flags[i]:run=[boundary]
-                                    else:
-                                        run.append(boundary)
-                                        if len(run)>1:runs.append(run)
-                                        run=[]
-                                if flags[i]:run.append(t)
-                            if len(run)>1:runs.append(run)
-                            for samples in runs:
+                            for samples in surviving_runs(a,b,step,keep):
                                 if samples[-1]-samples[0]<1e-5:continue
                                 hollow=p.kind=='PIPE'
                                 centers=[];normals=[]
@@ -423,6 +495,27 @@ def rebuild(source):
                                 off=len(verts);verts.extend(points);faces.extend(tuple(off+i for i in f) for f in polys)
                                 bar_ids.extend([bar_run]*len(polys));bar_run+=1
                                 if len(verts)>1500000:raise ValueError('Too many members; increase Spacing or lower Resolution')
+        piece_id=max(pieces,default=-1)+1
+        for centers,normals,start_free,end_free,custom in structure_rebar.path_runs(
+                paths,damage,p.break_amount/100,p.bend*unit,step):
+            points,polys=structure_rebar.generate(p,centers,normals,unit,start_free,end_free,bar_run,custom_path=custom)
+            off=len(verts);verts.extend(points);faces.extend(tuple(off+i for i in f) for f in polys)
+            bar_ids.extend([bar_run]*len(polys));bar_run+=1
+            if len(verts)>1500000:raise ValueError('Too many custom rebars; lower Resolution or simplify the guide paths')
+        for centers,normal,start_free,end_free in edge_runs(edges,metric,damage,p.break_amount/100,p.bend*unit,step):
+            if p.kind=='PIPE':
+                structure_pipes.add_run(p,pipe_buffer,centers,[normal]*len(centers),unit,
+                    start_free,end_free,pipe_run,0.,pipe_run)
+                pipe_run+=1
+                if pipe_buffer.nv>1500000:raise ValueError('Too many pipe polygons; increase Spacing or lower Resolution')
+                continue
+            else:
+                points,polys,flat=structure_wood.generate_edge(p,centers,normal,unit)
+                uv_points.extend(flat)
+                materials.extend([0]*len(polys))
+                pieces.extend([piece_id]*len(polys));piece_id+=1
+            off=len(verts);verts.extend(points);faces.extend(tuple(off+i for i in f) for f in polys)
+            if len(verts)>1500000:raise ValueError('Too many single-edge members; lower Resolution or use fewer edges')
         if pipe_buffer is not None and pipe_buffer.verts:
             verts=(np.vstack(pipe_buffer.verts)/(100.0/unit)).tolist()
             faces=pipe_buffer.faces;materials=pipe_buffer.mat
@@ -455,15 +548,19 @@ def rebuild(source):
             drop=max(range(3),key=lambda i:abs(normal[i]));axes=[i for i in range(3) if i!=drop]
             for li in face.loop_indices:
                 vi=mesh.loops[li].vertex_index
-                q=uv_points[vi] if uv_points else mesh.vertices[vi].co;uv.data[li].uv=(q[axes[0]]/unit,q[axes[1]]/unit)
+                q=uv_points[vi] if uv_points else mesh.vertices[vi].co;uv.data[li].uv=(q[axes[0]]/uv_unit,q[axes[1]]/uv_unit)
         target=output(source)
         if target is None:
             target=bpy.data.objects.new(source.name+' Result',mesh)
             (source.users_collection[0] if source.users_collection else bpy.context.collection).objects.link(target)
-            target.parent=source;target.matrix_parent_inverse=Matrix.Identity(4);target['pd_structure_owner']=source;target['pd_structure_output']=True
+            target.parent=source;target['pd_structure_owner']=source;target['pd_structure_output']=True
         else:
             commit_mesh(target,mesh)
+        if not output_aligned(target):
+            target.matrix_parent_inverse=Matrix.Identity(4)
+            target.matrix_basis=Matrix.Identity(4)
         mesh=None
+        target.hide_select = True
         structure_shading.ensure(source,target)
         _states[source.session_uid]=state(source)
         _pending.discard(source.name);_due.pop(source.name,None);_queued_ids.pop(source.name,None)
@@ -521,10 +618,16 @@ class PROJECT_DAMAGE_OT_structure_surface(bpy.types.Operator):
             if self.index<len(source.pd_structure.points):source.pd_structure.points.remove(self.index)
         elif self.action=='APPLY':
             if context.mode!='OBJECT':structure_drawing.finish(context,source)
-            if output(source) is None or _states.get(source.session_uid)!=state(source):rebuild(source)
-            target=output(source);world=target.matrix_world.copy();target.parent=None;target.matrix_world=world
+            if output(source) is None or not output_aligned(output(source)) or _states.get(source.session_uid)!=state(source):rebuild(source)
+            target=output(source)
+            if target is None:
+                self.report({'WARNING'}, 'No generated structure to apply')
+                return {'CANCELLED'}
+            world=target.matrix_world.copy();target.parent=None;target.matrix_world=world
             del target['pd_structure_owner'];del target['pd_structure_output']
-            from . import drawing_cleanup
+            target.hide_select = False
+            from . import drawing_cleanup, material_uv
+            target[material_uv.PRESERVE_OUTPUT_UV]=True
             drawing_cleanup.after_apply(source,[target])
             del source['pd_structure_source'];_states.pop(source.session_uid,None);_pending.discard(source.name);source.hide_set(True)
             for obj in context.selected_objects:obj.select_set(False)
@@ -537,9 +640,10 @@ class PROJECT_DAMAGE_OT_structure_surface(bpy.types.Operator):
 def draw(layout,context):
     source=owner(context)
     if source is None:return
-    from . import material_controls,material_library
+    from . import effect_layout, material_controls, material_library
     p=source.pd_structure
     material_controls.centered_heading(layout,KINDS.get(source['pd_structure_asset'],('Structural Surface',''))[0],icon='OUTLINER_OB_MESH')
+    effect_layout.standalone_update(layout, p, 'project_damage.structure_surface', action='UPDATE')
     layout.label(text='Edit the wire plane to extend or bend the structure.',icon='EDITMODE_HLT')
     if p.kind=='BRICK':
         from . import structure_bricks
@@ -549,6 +653,8 @@ def draw(layout,context):
     box=layout.box();material_controls.centered_heading(box,'Geometry')
     material_library.draw_property(box,p,'material',text='Material')
     quality_ui.draw(box, p,'resolution')
+    box.prop(p,'master_scale')
+    box.prop(p,'single_edge_members',text='Custom Rebars' if p.kind=='REBAR' else 'Single-Edge Members')
     if p.kind=='PIPE':box.prop(p,'pipe_type')
     if p.kind=='REBAR':box.prop(p,'rebar_type')
     if p.kind=='BRICK':
@@ -598,7 +704,6 @@ def draw_damage_footer(layout,context,source):
     box.prop(p,'damage_radius');box.prop(p,'break_amount');box.prop(p,'damage_randomness')
     if p.kind!='BRICK':box.prop(p,'bend')
     if len(p.points) or p.drawing:box.prop(p,'seed',text='Damage Seed')
-    row=layout.row(align=True);row.prop(p,'live_update',toggle=True);row.operator('project_damage.structure_surface',text='Update',icon='FILE_REFRESH').action='UPDATE'
     layout.operator('project_damage.structure_surface',text='Apply Geometry',icon='CHECKMARK').action='APPLY'
 
 
@@ -669,11 +774,20 @@ def refresh_sources():
         for obj in bpy.data.objects:
             if obj.get('pd_structure_source'):
                 structure_drawing.restore_saved_projection(obj)
-                structure_shading.ensure(obj,output(obj))
+                target = output(obj)
+                if target is not None and target.is_editable:
+                    target.hide_select = True
+                    layer = bpy.context.view_layer
+                    if layer is not None and layer.objects.active == target and obj.name in layer.objects and obj.visible_get(view_layer=layer):
+                        target.select_set(False, view_layer=layer)
+                        obj.select_set(True, view_layer=layer)
+                        layer.objects.active = obj
+                structure_shading.ensure(obj,target)
                 _sources.add(obj.name)
                 signature=state(obj)
                 previous=_history_states.get(obj.session_uid,previous_states.get(obj.session_uid))
-                if previous is not None and previous!=signature and obj.pd_structure.live_update and output(obj) is not None:
+                if target is not None and obj.pd_structure.live_update and (not output_aligned(target) or
+                        (previous is not None and previous!=signature)):
                     changed.append(obj.name)
                 else:_states[obj.session_uid]=signature
     finally:

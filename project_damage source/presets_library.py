@@ -2527,8 +2527,10 @@ def apply(src, key, *, additive=False, context=None):
                 sidebar.set_enabled(src, effect, False)
         for prop in _CORE:
             setattr(p, prop, False)
+    newly_added = set()
     for effect in effects:
         if not additive or not sidebar.enabled(src, effect):
+            newly_added.add(effect)
             sidebar.set_enabled(src, effect, True)
 
     from . import fracture_stack
@@ -2544,6 +2546,16 @@ def apply(src, key, *, additive=False, context=None):
                          (name in sidebar.ENABLE_PROPS and not value)):
             continue
         setattr(p, name, value)
+    if additive:
+        # Presets were authored against all-zero starter amounts; an effect a
+        # preset adds keeps exactly the amounts the preset was designed with.
+        starters = {}
+        if 'surface' in newly_added:
+            starters['surf_amount'] = None
+        if newly_added & set(fracture_stack.FRACTURE_KEYS):
+            starters.update(dict.fromkeys(fracture_stack.STARTER_AMOUNTS))
+        for name in starters.keys() - entry['props'].keys():
+            p.property_unset(name)
     if any(effect in {'fabric','fabric_solid'} for effect in effects):
         p.fabric_geometry='SOLIDIFY' if 'fabric_solid' in effects else 'FLAT'
     if 'peeling' in effects and not keep_peeling:

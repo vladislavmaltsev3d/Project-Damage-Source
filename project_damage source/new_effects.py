@@ -5,7 +5,7 @@ import bpy
 import numpy as np
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
-from . import ownership
+from . import ownership, through_holes
 
 DRAWINGS = ('draw_mask_drawing','chips_drawing','rebar_drawing','bevel_drawing','scratch_drawing','wood_drawing', 'lath_drawing', 'wallpaper_drawing',
             'fabric_holes_drawing', 'fabric_edges_drawing', 'bullet_drawing',
@@ -17,6 +17,7 @@ DRAWINGS += ('cellf_drawing','cellf_surface_drawing','cellf_guidance_drawing','r
 DRAWINGS += ('corner_drawing','clay_drawing')
 DRAWINGS += ('build_drawing','peeling_drawing','metaltear_drawing')
 DRAWINGS += ('weld_drawing','grass_drawing','gravel_drawing')
+DRAWINGS += tuple(module + '_through_hole_drawing' for module in through_holes.MODULES)
 
 
 def fill_hit_empties(context, source, core, factor, module='hit'):

@@ -67,9 +67,9 @@ def wood_material():
     return get('framing')
 
 
-def finish_mesh(mesh, source, grain):
+def finish_mesh(mesh, source, grain, *, props=None):
     """The splinter material and the grain attribute on the output mesh."""
-    p = source.project_damage
+    p = source.project_damage if props is None else props
     mesh.materials.clear()
     mesh.materials.append(getattr(p, 'rebar_chips_material', None) or wood_material())
     if grain is not None and len(grain) == 3 * len(mesh.vertices):

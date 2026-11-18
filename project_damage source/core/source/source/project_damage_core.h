@@ -128,6 +128,7 @@ struct FractProximity
 
 struct BreakerSpec
 {
+    Int32 booleanOwner = 0;
 	Int32  mode       = 0;
 	Bool   flip       = false;
 	Int32  seed       = 12345;
@@ -188,9 +189,23 @@ struct BreakerSpec
 BreakerSpec ReadBreakerSpec(const BaseContainer* bc, Int32 mode);
 #endif
 
+struct PaintedThroughHole
+{
+    Int32 effect = 0;
+    Float nearMin = 0.0, nearMax = 0.0;
+    std::vector<Float> outline;
+    std::vector<Float> toPlane, toSource;
+};
+
 struct ProjectDamageParams
 {
+    std::vector<PaintedThroughHole> throughHoles;
     std::vector<ProjectDamageParams> fractureLayers;
+    std::vector<ProjectDamageParams> wallLayers, booleanLayers;
+    bool booleanTubeFill = false;
+    std::vector<Float> wallStrokePoints;
+    std::vector<Int32> wallStrokeCounts;
+    Int32 wallInstance = 0;
     std::vector<Float> fractureGuidePoints;
     std::vector<Int32> fractureGuideCounts, fractureGuideLevels;
     Int32 fractureEffectId = 4;
@@ -663,6 +678,23 @@ struct CoreInput
 m::Manifold BuildInputManifold(const double* xyz, size_t nv, const int32_t* abcd, size_t np,
 	uint32_t originalId, bool stampFaceIds, const double* uvs);
 
+struct BreakRebarMesh
+{
+    std::vector<EVec> points;
+    std::vector<ProjectDamagePoly> polys;
+    std::vector<Int32> polyBar, polyPart, brickKey;
+    std::vector<float> exposure, grain;
+    std::vector<double> brickFrame, brickCut;
+    Int32 bars = 0;
+};
+
+struct BooleanBody
+{
+    Int32 serial = 0;
+    std::vector<EVec> points;
+    std::vector<ProjectDamagePoly> polys;
+};
+
 struct CoreResult
 {
 	Bool inputValid = false;
@@ -703,7 +735,7 @@ struct CoreResult
     std::vector<Int32> cellfPiece, cellfBasePoly;
     std::vector<double> cellfUvs, cellfNormals, cellfPieceVolume, cellfPieceCenter;
     Bool debrisSourceUvs = false;
-    std::vector<Int32> lathPiece;
+    std::vector<Int32> lathPiece, lathInstance;
 	std::vector<EVec> coatingPoints;
 	std::vector<ProjectDamagePoly> coatingPolys;
 	Bool passthrough = false;
@@ -732,6 +764,7 @@ struct CoreResult
     std::vector<double> cornerNormals;
     std::vector<EVec> concreteRebarPoints;
     std::vector<ProjectDamagePoly> concreteRebarPolys;
+    std::vector<Int32> concreteRebarInstance;
     std::vector<EVec> rebarPoints;
     std::vector<double> rebarBrickFrame, rebarBrickCut;
     std::vector<Int32> rebarBrickKey;
@@ -744,6 +777,8 @@ struct CoreResult
     std::vector<float> rebarExposure;
     std::vector<float> rebarGrain;                                                                       
     Int32 rebarBars = 0;
+    std::vector<std::pair<Int32, BreakRebarMesh>> booleanFills;
+    std::vector<BooleanBody> booleanBodies;
 };
 
 CoreResult BuildWornCore(const CoreInput& in, const ProjectDamageParams& params,

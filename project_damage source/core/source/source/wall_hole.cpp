@@ -30,7 +30,7 @@
 #include "manifold/manifold.h"
 #include "manifold/cross_section.h"
 #include "wall_hole.h"
-#include "project_damage_bvh.h"
+#include "through_wall_exit.h"
 #include "project_damage_internal.h"
 #include <algorithm>
 #include <cmath>
@@ -120,18 +120,7 @@ void PlaceWallHoles(const CoreInput& in, const WallHoleParams& p, Int32 mainSeed
 			}
 		}
 		                               
-		double T = -1.0;
-		{
-			V o = hitP - n * (2 * eps);
-			double done = 0.0;
-			for (int g = 0; g < 16; ++g)
-			{
-				double d = 0.0; int32_t poly = -1;
-				if (!bvh.Raycast(o, n * -1.0, diag, &d, &poly)) break;
-				done += d;
-				T = done; break;
-			}
-		}
+		const double T = FindWallExit(bvh, mv, hitP, n, 2 * eps, diag);
 		if (!(T > 0.0)) { HostLog(host, "[ProjectDamage] wall hole: no wall thickness at a site; skipped"); continue; }
 		Frame f;
 		f.w = n * -1.0;

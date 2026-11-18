@@ -10,27 +10,7 @@ PROJECT_DAMAGE_NS_MACRO_BEGIN
 
                                                                              
                                                                       
-struct BreakRebarMesh
-{
-	std::vector<EVec>              points;
-	std::vector<ProjectDamagePoly> polys;                                       
-	std::vector<Int32>             polyBar;                                           
-	std::vector<float>             exposure;                                                      
-	std::vector<Int32>             polyPart;                                                                                    
-	std::vector<float>             grain;                                                                                
-	Int32                          bars = 0;
-	                                                                                
-	                                                                              
-	                                                                            
-	                                                                             
-	                                                                      
-	                                                                              
-	                                                                            
-	                                                                          
-	std::vector<double>            brickFrame;
-	std::vector<Int32>             brickKey;
-	std::vector<double>            brickCut;
-};
+
 
                                                                              
                                                                             
@@ -44,6 +24,6 @@ void BuildBreakRebar(const m::Manifold& source, const std::vector<m::Manifold>& 
 	const BreakRebarParams& p, Int32 mainSeed, BreakRebarMesh& out, const m::Manifold* left = nullptr, const SurfaceDirectionField* guide = nullptr);
 
 void BuildRebarSurfacePath(const BreakRebarParams& p, const std::vector<EVec>& points,
-    const std::vector<EVec>& normals, bool freeStart, bool freeEnd, BreakRebarMesh& out);
+    const std::vector<EVec>& normals, bool freeStart, bool freeEnd, BreakRebarMesh& out, bool customPath = false);
 
 PROJECT_DAMAGE_NS_MACRO_END

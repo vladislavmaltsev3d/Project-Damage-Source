@@ -1,5 +1,5 @@
 # панели отдельных эффектов и общих инструментов
-from . import generated_geometry
+from . import generated_geometry, through_holes
 from . import quality_ui
 # ProjectDamage for Blender - worn edge damage cut into mesh objects.
 # Copyright (C) 2026 Vladislav Maltsev - Lazy3D
@@ -1379,7 +1379,7 @@ class OBJECT_PT_project_damage_concrete(_ProjectDamagePanel):
             if effect_layout.visible(p,'concrete_crack_branch'):col.prop(p,'concrete_crack_branch',text='Crack Branch')
             if effect_layout.visible(p,'concrete_crack_interior'):col.prop(p,'concrete_crack_interior',text='Crack Interior')
         col=toggle_box(layout,p,'concrete_hole_enable','Through Holes')
-        if col is not None:
+        if col is not None and through_holes.draw_controls(col, p, 'concrete'):
             if effect_layout.visible(p,'concrete_hole_chance'):col.prop(p,'concrete_hole_chance',text='Hole Chance')
             if effect_layout.visible(p,'concrete_hole_size'):col.prop(p,'concrete_hole_size',text='Hole Size')
             if effect_layout.visible(p,'concrete_hole_jagged'):col.prop(p,'concrete_hole_jagged',text='Hole Jagged')
@@ -1446,7 +1446,8 @@ class OBJECT_PT_project_damage_hit(_ProjectDamagePanel):
         if effect_layout.visible(p,'hit_aggregate_size'):col.prop(p,'hit_aggregate_size',text='Aggregate Size')
         if effect_layout.visible(p,'hit_thickness_cap'):col.prop(p,'hit_thickness_cap',text='Thickness Cap')
         if effect_layout.visible(p,'hit_hole_enable'):col.prop(p,'hit_hole_enable',text='Hole Enable')
-        if effect_layout.visible(p,'hit_hole_size'):col.prop(p,'hit_hole_size',text='Hole Size')
+        if p.hit_hole_enable and through_holes.draw_controls(col, p, 'hit'):
+            if effect_layout.visible(p,'hit_hole_size'):col.prop(p,'hit_hole_size',text='Hole Size')
         col=toggle_box(layout,p,'hit_crack_enable','Cracks')
         if col is not None:
             material_controls.inline(col, p, 'fracture_l1_material', text='Cracks')
@@ -1712,8 +1713,9 @@ class OBJECT_PT_project_damage_wood(_ProjectDamagePanel):
             row.label(text="Break through (broken boards)", icon=effect_layout.heading_icon("Break through (broken boards)"))
             col = box.column(align=True)
             col.prop(p, "wood_break_enable", text="Break Enable")
-            col.prop(p, "wood_break_chance", text="Break Chance")
-            col.prop(p, "wood_break_size", text="Break Size")
+            if p.wood_break_enable and through_holes.draw_controls(col, p, 'wood'):
+                col.prop(p, "wood_break_chance", text="Break Chance")
+                col.prop(p, "wood_break_size", text="Break Size")
 
                                                   
         if (
@@ -1899,7 +1901,7 @@ class OBJECT_PT_project_damage_lath(_ProjectDamagePanel):
             if effect_layout.visible(p,'lath_crack_interior'):col.prop(p,'lath_crack_interior',text='Crack Interior')
         holes=_ui_disclosure(layout,'lath_holes_open','Through Holes')
         col=toggle_box(holes,p,'lath_hole_enable','Enable Through Holes') if holes is not None else None
-        if col is not None:
+        if col is not None and through_holes.draw_controls(col, p, 'lath'):
             if effect_layout.visible(p,'lath_hole_chance'):col.prop(p,'lath_hole_chance',text='Hole Chance')
             if effect_layout.visible(p,'lath_hole_size'):col.prop(p,'lath_hole_size',text='Hole Size')
             if effect_layout.visible(p,'lath_hole_jagged'):col.prop(p,'lath_hole_jagged',text='Hole Jagged')
@@ -2533,7 +2535,7 @@ def draw_classic_brick(layout,context,p):
             sub.prop(p,'brick_loose_out',text='Loose Out')
             sub.prop(p,'brick_loose_out_dist',text='Loose Out Dist (cm)')
     col=toggle_box(layout,p,'brick_hole_enable','Through Holes')
-    if col is not None:
+    if col is not None and through_holes.draw_controls(col, p, 'brick'):
         col.prop(p,'brick_hole_chance',text='Hole Chance')
         col.prop(p,'brick_hole_size',text='Hole Size')
     col=toggle_box(layout,p,'brick_crack_enable','Cracks')
@@ -2814,8 +2816,9 @@ class OBJECT_PT_project_damage_brick(_ProjectDamagePanel):
             row.label(text="Hole (through the mesh)", icon=effect_layout.heading_icon("Hole (through the mesh)"))
             col = box.column(align=True)
             col.prop(p, "brick_hole_enable", text="Hole Enable")
-            col.prop(p, "brick_hole_chance", text="Hole Chance")
-            col.prop(p, "brick_hole_size", text="Hole Size")
+            if p.brick_hole_enable and through_holes.draw_controls(col, p, 'brick'):
+                col.prop(p, "brick_hole_chance", text="Hole Chance")
+                col.prop(p, "brick_hole_size", text="Hole Size")
 
                                         
         if (
@@ -4848,7 +4851,9 @@ def draw_boolean_controls(layout, context):
 
     variant=boolean_break.variant(p)
     if variant=='SIMPLE':return
-    if not generated_geometry.draw(layout, p, 'boolean'):return
+    if not generated_geometry.draw(layout, p, 'boolean'):
+        if variant=='REBAR':draw_hand_drawn_rebars(layout,p)
+        return
     if variant=='CENTRAL':
         draw_boolean_central_rebar(layout,p)
         return
@@ -5017,16 +5022,31 @@ def draw_boolean_rebars(layout,p):
     col.prop(p,'rebar_broken',text='Break Probability')
     col.prop(p,'rebar_trim',text='Broken-end Shortening')
     col.prop(p,'rebar_neck',text='Broken-end Taper')
+    draw_hand_drawn_rebars(layout,p)
+
+
+def draw_hand_drawn_rebars(layout,p):
+    from . import boolean_ui_controls, effect_layout
     box=effect_layout.section(layout,'Hand-Drawn Bars — Curve')
     box.prop(p,'rebar_drawing',text='Curve')
+    step = boolean_ui_controls.curve_creation_step(p.id_data)
+    if step != 'ADD':
+        box.label(text='Place the 3D Cursor at the end point' if step == 'END' else 'Place the 3D Cursor at the start point',
+                  icon='PIVOT_CURSOR')
     row=box.row(align=True);row.scale_y=1.5
-    row.operator('project_damage.rebar_curve',text='New Curve',icon='CURVE_BEZCURVE').action='NEW'
-    if p.rebar_drawing is not None:
+    row.operator_context='EXEC_DEFAULT'
+    label, icon = {'ADD': ('Add', 'ADD'), 'START': ('Set Start Point', 'PIVOT_CURSOR'),
+                   'END': ('Set End Point', 'CHECKMARK')}[step]
+    row.operator('project_damage.rebar_curve',text=label,icon=icon).action=step
+    if step != 'ADD':
+        row.operator('project_damage.rebar_curve',text='Cancel',icon='X').action='CANCEL'
+    elif p.rebar_drawing is not None:
         row.operator('project_damage.rebar_curve',text='Edit Curve',icon='EDITMODE_HLT').action='EDIT'
         row.operator('project_damage.paint_delete',text='',icon='TRASH').target='REBAR'
+    if p.rebar_drawing is not None:
         col=box.column(align=True)
         col.prop(p,'rebar_stroke_radius',text='Curve Bar Width')
-        col.prop(p,'rebar_stroke_embed',text='Curve Anchoring Length')
+        material_controls.inline(box, p, 'rebar_drawn_material', text='Hand-Drawn Rebar Material')
 
 
 def draw_boolean_volume_placement(layout,p):
@@ -5125,6 +5145,7 @@ def draw_boolean_tubes(layout,p,variant):
         col.prop(p,'pipe_cover',text='Deepness')
     else:
         col.prop(p,'cable_count',text='Amount')
+        col.prop(p,'cable_run_gap')
         col.prop(p,'boolean_cable_scale',text='Scale')
         col.prop(p,'cable_diameter',text='Diameter')
         col.prop(p,'cable_cover',text='Deepness')
@@ -5494,7 +5515,7 @@ def draw_stud_framing_settings(layout,p):
     if col is None:return
     col.prop(p,'lath_nail_amount',text='Nails')
     if p.lath_nail_amount>0:
-        col.prop(p,'lath_nail_length',text='Nail Length (x skin)')
+        col.prop(p,'lath_nail_length',text='Nail Length')
 
 
 def draw_roots_settings(layout, context):

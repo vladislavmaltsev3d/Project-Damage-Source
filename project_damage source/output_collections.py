@@ -11,10 +11,11 @@ def source_collections():
     return {c for root in roots for c in (root,*root.children_recursive)}
 
 
-def destination(context,source):
+def destination(context,source,*,available=None):
     from . import build
     excluded=source_collections()
-    scene_collections={context.scene.collection,*context.scene.collection.children_recursive}
+    scene_collections=({context.scene.collection,*context.scene.collection.children_recursive}
+                       if available is None else available)
     def valid(coll):
         return isinstance(coll,bpy.types.Collection) and coll in scene_collections and coll not in excluded and coll.is_editable
     pending=source.get('project_damage_preparation_target')
@@ -27,6 +28,24 @@ def destination(context,source):
     for coll in source.users_collection:
         if valid(coll):return coll
     return context.scene.collection
+
+
+def _visible_collections(layer):
+    if layer.exclude or layer.hide_viewport or layer.collection.hide_viewport:
+        return
+    yield layer.collection
+    for child in layer.children:
+        yield from _visible_collections(child)
+
+
+def link_drawing(context, source, drawing):
+    """Keep the drawing accessible without opening excluded collections."""
+    available = set(_visible_collections(context.view_layer.layer_collection)) - source_collections()
+    if available.intersection(drawing.users_collection):
+        return
+    target = destination(context, source, available=available)
+    if drawing.name not in target.objects:
+        target.objects.link(drawing)
 
 
 def link_object(context,source,obj):

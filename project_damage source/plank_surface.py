@@ -9,6 +9,7 @@ from mathutils import Vector
 from bpy.app.handlers import persistent
 _busy=False
 _pending=set()
+_pin_positions={}
 
 def owner(context):
     ob=context.active_object
@@ -57,6 +58,14 @@ class PDPlankProps(bpy.types.PropertyGroup):
     material:bpy.props.PointerProperty(name='Top Wood',type=bpy.types.Material,update=update)
     under_material:bpy.props.PointerProperty(name='Under Wood',type=bpy.types.Material,update=update)
 
+def _damage_pins(target, candidates):
+    rows=target.pd_planks.points
+    linked={row.obj for row in rows if row.obj is not None}
+    pins=[row.obj for row in rows if row.enabled and row.obj is not None]
+    pins.extend(pin for pin in candidates if pin not in linked and pin.get('pd_plank_owner')==target.name)
+    return dict.fromkeys(pins)
+
+
 def rebuild(ob):
     global _busy
     if _busy:return
@@ -64,11 +73,11 @@ def rebuild(ob):
     try:
         p=ob.pd_planks;verts=[];faces=[];mats=[]
         pins=[]
-        linked={item.obj for item in p.points if item.obj is not None}
-        targets=[item.obj for item in p.points if item.obj is not None and item.enabled]
-        targets += [pin for pin in bpy.data.objects if pin.get('pd_plank_owner')==ob.name and pin not in linked]
-        for pin in dict.fromkeys(targets):
-            now=ob.matrix_world.inverted()@pin.matrix_world.translation
+        inverse=ob.matrix_world.inverted_safe()
+        positions={}
+        for pin in _damage_pins(ob,bpy.data.objects):
+            now=inverse@pin.matrix_world.translation
+            positions[pin.session_uid]=tuple(now)
             rest=Vector(pin.get('pd_plank_rest',now))
             pins.append((now,Vector((0,0,-p.bend_depth))) if p.mode=='PROXIMITY' else (rest,now-rest))
         def warp(co):
@@ -133,6 +142,7 @@ def rebuild(ob):
                 co=mesh.vertices[mesh.loops[li].vertex_index].co;uv.data[li].uv=(co.x,co.y)
         old=ob.data;ob.data=mesh
         if old.users==0:bpy.data.meshes.remove(old)
+        _pin_positions[ob.session_uid]=positions
     finally:_busy=False
 
 def tick():
@@ -147,21 +157,32 @@ def tick():
 
 @persistent
 def changed(scene,depsgraph):
-    from . import live_input_state
+    from . import live
     if _busy:return
     moved={event.id.original for event in depsgraph.updates if isinstance(event.id.original,bpy.types.Object) and event.is_updated_transform}
-    moved={obj for obj in moved if live_input_state.changed(obj, 'planks')}
     if not moved:return
-    for target in scene.objects:
-        if not target.get('pd_plank_surface') or not target.pd_planks.live_update:continue
-        refs={item.obj for item in target.pd_planks.points if item.enabled and item.obj}
-        if refs & moved or any(o.get('pd_plank_owner')==target.name for o in moved if o!=target):
-            _pending.add(target.name)
+    for target in live._scan().planks:
+        if target.name not in scene.objects or not target.pd_planks.live_update:continue
+        pins=moved.intersection(_damage_pins(target,moved))-{target}
+        if not pins:continue
+        # The planks use each linked pin's position in their local space.
+        inverse=target.matrix_world.inverted_safe()
+        positions=_pin_positions.setdefault(target.session_uid,{})
+        for pin in pins:
+            current=tuple(inverse@pin.matrix_world.translation)
+            previous=positions.get(pin.session_uid)
+            if previous is None and target in moved and pin.parent==target:
+                positions[pin.session_uid]=current
+                continue
+            if previous is None or any(not math.isclose(a,b,rel_tol=1e-6,abs_tol=1e-6) for a,b in zip(previous,current)):
+                positions[pin.session_uid]=current
+                _pending.add(target.name)
     if _pending and not bpy.app.timers.is_registered(tick):bpy.app.timers.register(tick,first_interval=.15)
 
 @persistent
 def clear(*args):
     _pending.clear()
+    _pin_positions.clear()
     if bpy.app.timers.is_registered(tick):bpy.app.timers.unregister(tick)
 
 # действие «Plank Surface»
@@ -217,8 +238,8 @@ def draw(layout,context):
     from .material_library import draw_property
     ob=owner(context);p=ob.pd_planks
     layout.label(text=ob.name,icon='MOD_BUILD')
+    effect_layout.standalone_update(layout, p, 'project_damage.plank_surface', action='UPDATE')
     box=effect_layout.section(layout,'General');col=box.column(align=True)
-    col.prop(p,'live_update',toggle=True,icon='FILE_REFRESH')
     col.prop(p,'width');col.prop(p,'length');col.prop(p,'horizontal',toggle=True)
     col.prop(p,'seed');quality_ui.draw(col, p,'resolution')
     col.prop(p,'auto_smooth',toggle=True,icon='SHADING_RENDERED')
@@ -244,7 +265,6 @@ def draw(layout,context):
 
     row=box.row(align=True);row.operator('project_damage.plank_surface',text='Add Empty at Cursor',icon='ADD').action='PIN'
     row.operator('project_damage.plank_surface',text='Automatic Pins',icon='EMPTY_DATA').action='AUTO'
-    box.operator('project_damage.plank_surface',text='Update',icon='FILE_REFRESH').action='UPDATE'
     box.label(text='Damage follows the object position' if p.mode=='PROXIMITY' else 'Move a pin to bend and tear the boards',icon='INFO')
 
 CLASSES=(PDPlankPoint,PDPlankProps,PD_OT_planks)
@@ -253,11 +273,11 @@ def register():
     for cls in CLASSES:bpy.utils.register_class(cls)
     bpy.types.Object.pd_planks=bpy.props.PointerProperty(type=PDPlankProps)
     bpy.app.handlers.depsgraph_update_post.append(changed)
-    bpy.app.handlers.undo_pre.append(clear);bpy.app.handlers.load_pre.append(clear)
+    bpy.app.handlers.undo_pre.append(clear);bpy.app.handlers.redo_pre.append(clear);bpy.app.handlers.load_pre.append(clear)
 # убираем подключения модуля при выключении аддона
 def unregister():
     clear()
-    for handlers,fn in ((bpy.app.handlers.depsgraph_update_post,changed),(bpy.app.handlers.undo_pre,clear),(bpy.app.handlers.load_pre,clear)):
+    for handlers,fn in ((bpy.app.handlers.depsgraph_update_post,changed),(bpy.app.handlers.undo_pre,clear),(bpy.app.handlers.redo_pre,clear),(bpy.app.handlers.load_pre,clear)):
         if fn in handlers:handlers.remove(fn)
     if hasattr(bpy.types.Object,'pd_planks'):del bpy.types.Object.pd_planks
     for cls in reversed(CLASSES):bpy.utils.unregister_class(cls)

@@ -16,6 +16,7 @@
 #            displacement material) moves the roots as one surface instead of
 #            pulling them apart.
 from . import output_collections
+from . import guide_timing
 import bpy
 import bmesh
 import time
@@ -86,16 +87,18 @@ def dependencies_changed(scene, depsgraph):
                if u.is_updated_geometry or u.is_updated_transform}
     if not changed:
         return
-    for source in scene.objects:
-        if source.type != 'MESH' or not source.project_damage.roots_enable:
+    for source in live._scan().sources:
+        if not source.project_damage.roots_enable or source.name not in scene.objects:
             continue
         s = source.project_damage_roots
-        objects = [source, result_of(source), s.guide]
+        result = result_of(source)
+        surface = {source, result}
+        objects = [source, result, s.guide]
         if s.seeds is not None:
             objects.extend(o for o in s.seeds.all_objects if o.type == 'EMPTY')
-        if any(not (obj in {source,result_of(source)} and obj in moving)
+        if any(not (obj in surface and obj in moving)
                and (obj in changed or (obj.data is not None and obj.data in changed))
-               and live_input_state.changed(obj, 'roots', local=obj in {source,result_of(source)})
+               and live_input_state.changed(obj, 'roots', local=obj in surface)
                for obj in objects if obj is not None):
             queue_update(source)
 
@@ -477,7 +480,7 @@ class PROJECT_DAMAGE_OT_roots_draw(bpy.types.Operator):
             if bpy.app.version < (4,3,0):
                 self.report({'ERROR'},'Quick Draw needs Blender 4.3 or newer');return {'CANCELLED'}
             gp = bpy.data.grease_pencils.new(source.name+'_RootsGuide')
-            gp.layers.new('Root Guides',set_active=True).frames.new(context.scene.frame_current)
+            gp.layers.new('Root Guides',set_active=True).frames.new(guide_timing.FRAME)
             drawing = bpy.data.objects.new(gp.name,gp)
             output_collections.link_object(context,source,drawing)
             drawing.parent = source;drawing.hide_render=True

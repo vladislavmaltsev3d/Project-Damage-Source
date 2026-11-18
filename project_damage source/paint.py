@@ -8,6 +8,7 @@ are planar regions, independently projected onto their nearest source face.
 """
 from . import output_collections
 from types import SimpleNamespace
+from . import guide_timing
 import bpy
 import numpy as np
 from mathutils import Vector
@@ -17,6 +18,9 @@ from . import mesh_io, ownership
 
 
 def drawing_prop(target, level=1):
+    from .through_holes import TARGETS
+    if target in TARGETS:
+        return TARGETS[target] + '_through_hole_drawing'
     if target in {'WELD','GRASS','GRAVEL'}:return target.lower()+'_drawing'
     if target=='FRACT_HELPER':return 'fract_helper_drawing'
     if target=='CLAY':return 'clay_drawing'
@@ -57,13 +61,14 @@ def read_paths(context, source, drawing, min_points=2, layer_names=None):
     ev = drawing if drawing.hide_get(view_layer=context.view_layer) else drawing.evaluated_get(deps)
     rel = source.evaluated_get(deps).matrix_world.inverted() @ ev.matrix_world
     paths = []
+    held = guide_timing.uses_held_frame(drawing)
     for layer in ev.data.layers:
         if layer_names is not None and layer.name not in layer_names:
             continue
         if layer.hide:
             continue
         if hasattr(layer, 'current_frame'):
-            frame = layer.current_frame()
+            frame = guide_timing.frame(layer, held)
             mat = rel @ layer.matrix_local
         else:
             frame = layer.active_frame
@@ -148,7 +153,7 @@ def ensure_cell_layer(context, source, mode):
         if drawing is None:
             gp = bpy.data.grease_pencils.new(source.name + '_CellFractureDrawing')
             drawing = bpy.data.objects.new(gp.name, gp)
-            output_collections.link_object(context,source,drawing)
+            output_collections.link_drawing(context, source, drawing)
             drawing.parent = source
             drawing.hide_render = True
         gp = drawing.data
@@ -167,14 +172,14 @@ def ensure_cell_layer(context, source, mode):
             names = _cell_layer_names(drawing, kind)
             if not names:
                 layer = gp.layers.new(CELL_LAYERS[kind], set_active=False)
-                layer.frames.new(context.scene.frame_current)
+                layer.frames.new(guide_timing.FRAME)
         names = _cell_layer_names(drawing, mode)
         layer = gp.layers[names[0]]
         gp.layers.active = layer
         layer.hide = False
         layer.lock = False
-        if layer.current_frame() is None:
-            layer.frames.new(context.scene.frame_current)
+        if not layer.frames:
+            layer.frames.new(guide_timing.FRAME)
         ink_name = 'ProjectDamage Cell ' + mode + ' Ink'
         ink = next((m for m in gp.materials if m and m.name == ink_name), None)
         if ink is None:
@@ -436,6 +441,10 @@ def collect(context, source, points, polys, factor):
 
 
 def source_for(context):
+    from . import structure_surface
+    structure = structure_surface.owner(context)
+    if structure is not None:
+        return structure
     obj = ownership.context_source(context)
     if obj is None:
         return None
@@ -448,9 +457,22 @@ def source_for(context):
 
 
 def _activate(context, obj):
-    if obj.type in {'GREASEPENCIL','GPENCIL'} and obj.get('project_damage_paint_source'):
+    layer = context.view_layer
+    if obj.name not in layer.objects:
+        layer.update()
+    owner = obj.get('project_damage_paint_source')
+    if obj.type in {'GREASEPENCIL','GPENCIL'} and isinstance(owner, bpy.types.Object):
+        if obj.name in layer.objects:
+            obj.hide_set(False, view_layer=layer)
+        if obj.name not in layer.objects or not obj.visible_get(view_layer=layer):
+            output_collections.link_drawing(context, owner, obj)
+            layer.update()
+        if not obj.visible_get(view_layer=layer):
+            raise RuntimeError('Make the drawing visible in the active View Layer to edit it')
         from . import viewport_helpers
         viewport_helpers.activate(context,obj)
+    if obj.name not in layer.objects:
+        raise RuntimeError(f'{obj.name} is outside the active View Layer')
     if context.object and context.object.mode != 'OBJECT':
         if context.object.type in {'GREASEPENCIL','GPENCIL','CURVE'}:
             from . import live
@@ -458,9 +480,9 @@ def _activate(context, obj):
         bpy.ops.object.mode_set(mode='OBJECT')
     for ob in context.selected_objects:
         ob.select_set(False)
-    obj.hide_set(False)
-    obj.select_set(True)
-    context.view_layer.objects.active = obj
+    obj.hide_set(False, view_layer=layer)
+    obj.select_set(True, view_layer=layer)
+    layer.objects.active = obj
 
 
 DRAW_BRUSH_DIAMETER = 0.004406
@@ -469,7 +491,7 @@ DRAW_BRUSH_DIAMETER = 0.004406
 def _set_draw_brush_diameter(context):
     settings = context.scene.tool_settings
     paint = settings.gpencil_paint
-    brush = paint.brush
+    brush = getattr(paint, 'brush', None)
                                                                            
                                                                             
     unified = getattr(paint, 'unified_paint_settings', None)
@@ -478,7 +500,10 @@ def _set_draw_brush_diameter(context):
     for owner in (brush, unified):
         if owner is not None:
             owner.use_locked_size = 'SCENE'
-            owner.unprojected_size = DRAW_BRUSH_DIAMETER
+            if hasattr(owner, 'unprojected_size'):
+                owner.unprojected_size = DRAW_BRUSH_DIAMETER
+            elif hasattr(owner, 'unprojected_radius'):
+                owner.unprojected_radius = DRAW_BRUSH_DIAMETER / 2
 
 
 _surface_session = None
@@ -497,11 +522,23 @@ def drawing_surfaces(context,drawing):
                 and obj.name in context.view_layer.objects and obj.visible_get(view_layer=context.view_layer)
                 and not obj.project_damage_breaker.is_breaker
                 and not obj.get('project_damage_proximity_owner'))
+    module = drawing.get('project_damage_through_hole_module')
+    if module:
+        surface = getattr(source.project_damage, module + '_through_hole_surface')
+        if surface is not None:
+            return [surface] if _visible_projection_surface(context, surface) else []
     if drawing.get('project_damage_cell_layers') and source.project_damage.cellf_enable:
         from . import cellf_output
         shards=[obj for obj in cellf_output.objects_of(source) if visible(obj)]
         if shards:return shards
     active=context.active_object
+    if drawing.get('project_damage_cell_layers'):
+        from . import physics_live
+        pieces = physics_live.projection_pieces(context, source)
+        if pieces:
+            body = result_of(source)
+            return [obj for obj in dict.fromkeys((active, body, *pieces))
+                    if visible(obj) and ownership.source_of(obj) == source]
     if visible(active) and ownership.source_of(active)==source:
         return [active]
     stored=drawing.get('project_damage_paint_surface')
@@ -548,7 +585,6 @@ def resume_surface_projection(context):
             or not drawing.get('project_damage_paint_source')):return
     from . import structure_drawing
     structure_source=structure_drawing.source_for_drawing(drawing)
-    if structure_source is not None:structure_drawing.prepare_projection(structure_source)
     surfaces=drawing_surfaces(context,drawing)
     if not surfaces:return
     if history is not None and history[:2]==(context.scene.name,drawing.name):
@@ -556,15 +592,18 @@ def resume_surface_projection(context):
         drawing.show_in_front=history[3]
     for obj in tuple(context.selected_objects):
         if obj!=drawing:obj.select_set(False)
-    start_surface_projection(context,drawing,surfaces)
+    start_surface_projection(context,drawing,surfaces,structure_source=structure_source)
     from . import live
     live.drawing_started(ownership.source_of(drawing),drawing=drawing)
 
 
-def start_surface_projection(context,drawing,surfaces):
+def start_surface_projection(context,drawing,surfaces,*,structure_source=None):
     global _surface_session
     finish_surface_projection()
     if not surfaces:raise RuntimeError('Make the Project Damage target mesh visible before drawing')
+    if structure_source is not None:
+        from . import structure_drawing
+        structure_drawing.prepare_projection(structure_source)
     settings=context.scene.tool_settings
     _surface_session=(context.scene,settings.use_gpencil_project_only_selected,drawing,drawing.show_in_front,tuple(surfaces))
     settings.use_gpencil_project_only_selected=True
@@ -599,14 +638,41 @@ def refresh_cell_knife_projection(context, source, shards):
     _surface_session = (scene, selected_only, obj, in_front, surfaces)
 
 
-def _start_drawing(context,obj,*,defer_preview=False):
+def refresh_physics_projection(context, source, pieces):
+    global _surface_session
+    from . import live
+    if _surface_session is None or context.mode not in live.GP_PAINT_MODES:
+        return
+    scene, selected_only, drawing, in_front, old = _surface_session
+    if (drawing != context.active_object or not drawing.get('project_damage_cell_layers')
+            or ownership.source_of(drawing) != source):
+        return
+    surfaces = tuple(dict.fromkeys(obj for obj in (*old, *pieces)
+                                  if _visible_projection_surface(context, obj)))
+    for obj in surfaces:
+        if not obj.select_get():
+            obj.select_set(True)
+    _surface_session = (scene, selected_only, drawing, in_front, surfaces)
+
+
+def _visible_projection_surface(context, obj):
+    try:
+        return obj.name in context.view_layer.objects and obj.visible_get(view_layer=context.view_layer)
+    except ReferenceError:
+        return False
+
+
+def _start_drawing(context,obj,*,defer_preview=False,structure_source=None):
     from . import live
     previous=live._APPLYING
     live._APPLYING=True
     try:
-        surfaces=drawing_surfaces(context,obj)
+        guide_timing.migrate(obj)
+        if structure_source is not None:
+            finish_surface_projection()
+        surfaces=[structure_source] if structure_source is not None else drawing_surfaces(context,obj)
         _activate(context,obj)
-        start_surface_projection(context,obj,surfaces)
+        start_surface_projection(context,obj,surfaces,structure_source=structure_source)
         context.scene.tool_settings.gpencil_stroke_placement_view3d='SURFACE'
         if hasattr(context.scene.tool_settings,'gpencil_surface_offset'):
             source=ownership.source_of(obj)
@@ -647,21 +713,39 @@ class PROJECT_DAMAGE_OT_paint_new(bpy.types.Operator):
         return new_drawing(context,self.target,self.level)
 
 
+def _structure_drawing(context, source, action):
+    loose = getattr(source.pd_structure, 'brick_loose_drawing', None)
+    role = 'LOOSE' if loose is not None and context.active_object == loose else 'DAMAGE'
+    return bpy.ops.project_damage.structure_drawing(action=action, source_name=source.name, role=role)
+
+
 def new_drawing(context,target,level=1):
     if bpy.app.version < (4, 3, 0):
         return {'CANCELLED'}
     source = source_for(context)
+    if source is None:
+        return {'CANCELLED'}
+    if source.get('pd_structure_source'):
+        return _structure_drawing(context, source, 'NEW')
     if target in {'CELLF', 'CELLF_SURFACE', 'CELLF_GUIDANCE'}:
         mode = {'CELLF': 'THROUGH', 'CELLF_SURFACE': 'SURFACE', 'CELLF_GUIDANCE': 'GUIDANCE'}[target]
         drawing = ensure_cell_layer(context, source, mode)
         _start_drawing(context, drawing) if drawing.type == 'GREASEPENCIL' else _activate(context, drawing)
         return {'FINISHED'}
+    from .through_holes import TARGETS
+    hole_module = TARGETS.get(target)
     name = source.name + ("_" + target.title() + "Paint" if target != 'FRACTURE' else "_FracturePaint")
+    if hole_module:
+        name = f'{source.name}_{hole_module.title()}_ThroughHole'
     gp = bpy.data.grease_pencils.new(name)
     layer = gp.layers.new('Damage Mask' if target == 'DRAWMASK' else "Damage Contours" if target in {'PEELING','SURFACE', 'CONCRETE', 'COATING', 'RUST', 'WOOD', 'LATH', 'BRICK', 'WALLPAPER', 'FABRIC_HOLES', 'FABRIC_EDGES'} else "Crack Paths", set_active=True)
-    layer.frames.new(context.scene.frame_current)
+    if hole_module:
+        layer.name = 'Through Hole Contours'
+    layer.frames.new(guide_timing.FRAME)
     obj = bpy.data.objects.new(name, gp)
-    output_collections.link_object(context,source,obj)
+    if hole_module:
+        obj['project_damage_through_hole_module'] = hole_module
+    output_collections.link_drawing(context, source, obj)
     obj.parent = source
     obj["project_damage_paint_source"] = source
     obj.hide_render = True
@@ -694,6 +778,8 @@ def draw_existing(context,target,level=1):
     source = source_for(context)
     if source is None:
         return {'CANCELLED'}
+    if source.get('pd_structure_source'):
+        return _structure_drawing(context, source, 'DRAW')
     if target in {'CELLF', 'CELLF_SURFACE', 'CELLF_GUIDANCE'}:
         mode = {'CELLF': 'THROUGH', 'CELLF_SURFACE': 'SURFACE', 'CELLF_GUIDANCE': 'GUIDANCE'}[target]
         drawing = ensure_cell_layer(context, source, mode)
@@ -703,6 +789,11 @@ def draw_existing(context,target,level=1):
     if drawing is None:
         return {'CANCELLED'}
     drawing["project_damage_paint_source"] = source
+    from .through_holes import TARGETS
+    if target in TARGETS:
+        drawing['project_damage_through_hole_module'] = TARGETS[target]
+    elif 'project_damage_through_hole_module' in drawing:
+        del drawing['project_damage_through_hole_module']
     if drawing.type == 'GREASEPENCIL':
         from . import fabric_paint
         if target in fabric_paint.TARGETS:fabric_paint.start(context,drawing)
@@ -727,6 +818,8 @@ class PROJECT_DAMAGE_OT_paint_delete(bpy.types.Operator):
         source = source_for(context)
         if source is None:
             return {'CANCELLED'}
+        if source.get('pd_structure_source'):
+            return _structure_drawing(context, source, 'REMOVE')
         prop = drawing_prop(self.target, self.level)
         drawing = getattr(source.project_damage, prop, None)
         if drawing is None or drawing.type not in {'GREASEPENCIL', 'GPENCIL', 'CURVE'}:
@@ -744,8 +837,6 @@ class PROJECT_DAMAGE_OT_paint_delete(bpy.types.Operator):
                 for name in _cell_layer_names(obj, mode):
                     obj.data.layers.remove(obj.data.layers[name])
             setattr(source.project_damage, prop, None)
-            from . import live
-            live.touch_prop(source.project_damage, context)
             return {'FINISHED'}
         if context.object == drawing:
             from .build import result_of
@@ -776,6 +867,8 @@ class PROJECT_DAMAGE_OT_paint_return(bpy.types.Operator):
         source = source_for(context)
         if source is None:
             return {'CANCELLED'}
+        if source.get('pd_structure_source'):
+            return _structure_drawing(context, source, 'FINISH')
         from . import live
         live.finish_drawing(source)
         from .build import result_of
@@ -946,16 +1039,30 @@ def remove_effect_drawing(source,key,drawings=None):
             extra={'foam':('project_damage_foam','drawing'),'ivy':('project_damage_ivy','guide'),'paper_generator':('project_damage_paper','drawing')}.get(key)
             if extra:setattr(getattr(source,extra[0]),extra[1],None)
         for drawing in drawings:
-            # пользовательский или общий рисунок не удаляем
-            if drawing.library or drawing.get('project_damage_paint_source')!=source:continue
-            users=bpy.data.user_map(subset={drawing}).get(drawing,set())
-            if any(not isinstance(user,bpy.types.Collection) for user in users):continue
-            if bpy.context.object==drawing and drawing.mode!='OBJECT':
-                bpy.ops.object.mode_set(mode='OBJECT')
-            data=drawing.data;materials=list(data.materials)
-            bpy.data.objects.remove(drawing,do_unlink=True)
-            if data.users==0:bpy.data.grease_pencils.remove(data)
-            for mat in materials:
-                if mat and mat.users==0:bpy.data.materials.remove(mat)
+            delete_unshared_drawing(source, drawing)
     finally:live._APPLYING=previous
+
+
+def delete_unshared_drawing(source, drawing):
+    from . import live
+
+    if drawing.library or drawing.get('project_damage_paint_source') != source:
+        return
+    # View layers report their scene in user_map without increasing the user count.
+    if drawing.users > len(drawing.users_collection):
+        return
+    users = bpy.data.user_map(subset={drawing}).get(drawing, set())
+    if any(not isinstance(user, (bpy.types.Collection, bpy.types.Scene)) for user in users):
+        return
+    if bpy.context.object == drawing and drawing.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+    data = drawing.data
+    materials = tuple(data.materials)
+    datablocks = bpy.data.curves if drawing.type == 'CURVE' else bpy.data.grease_pencils
+    bpy.data.objects.remove(drawing, do_unlink=True)
+    if data.users == 0:
+        datablocks.remove(data)
+    for mat in materials:
+        if mat and mat.users == 0:
+            bpy.data.materials.remove(mat)
     live.invalidate_index()

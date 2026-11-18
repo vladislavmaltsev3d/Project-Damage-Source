@@ -69,7 +69,7 @@ def _type_items():
 
 def _changed(self, context):
     if not _building:
-        queue(self.id_data, force=True)
+        queue(self.id_data)
 
 
 def _type_changed(self, context):
@@ -105,7 +105,7 @@ def _factor(name, default, description, maximum=1.0):
 
 # здесь хранятся значения, которые сохраняются вместе с объектом
 class ProjectDamageCableGenSettings(bpy.types.PropertyGroup):
-    enabled: bpy.props.BoolProperty(default=False, options={'HIDDEN'})
+    enabled: bpy.props.BoolProperty(default=False, options={'HIDDEN'}, update=lambda self, context: _invalidate_owner_index())
     result: bpy.props.PointerProperty(type=bpy.types.Object, options={'HIDDEN'})
     live_update: bpy.props.BoolProperty(name='Live Update', default=True, update=_changed,
                                         description='Rebuild the cables while you edit or move the curve, the proximity Empty, '
@@ -527,12 +527,12 @@ def build(context, owner, reports=None, force=True):
     digest = h.digest()
     if not force and old is not None and _last.get(owner.name) == digest:
         return old
-    _last[owner.name] = digest
     _building = True
     try:
         if not splines and not len(spawns):
             if old is not None:
                 old.data.clear_geometry()
+                _last[owner.name] = digest
             return old
         r = core.build_cable_curves([a for a, _c in splines], [int(c) for _a, c in splines], p,
                                     spawns, cpts, ctris, zones)
@@ -561,6 +561,7 @@ def build(context, owner, reports=None, force=True):
         group.add(range(len(mesh.vertices)), 1.0, 'REPLACE')
         s.result = obj
         s.enabled = True
+        _last[owner.name] = digest
         if reports is not None:
             text = '%d cables' % r['cables']
             for key in ('connectors', 'holes', 'ties', 'clips'):
@@ -594,7 +595,8 @@ def queue(owner, force=False):
     live = _live()
     if live is not None and getattr(live, '_HISTORY_RESTORING', False):
         return
-    _pending[owner.name] = time.monotonic()
+    _, already_forced = _pending.get(owner.name, (0.0, False))
+    _pending[owner.name] = time.monotonic(), force or already_forced
     if not bpy.app.timers.is_registered(_tick):
         bpy.app.timers.register(_tick, first_interval=0.05)
 
@@ -604,12 +606,15 @@ def _tick():
     if live is not None and getattr(live, '_HISTORY_RESTORING', False):
         _pending.clear()
         return None
-    for name, stamp in list(_pending.items()):
+    for name, (stamp, force) in list(_pending.items()):
         if time.monotonic() - stamp < 0.04:
             continue
         _pending.pop(name, None)
         owner = bpy.data.objects.get(name)
-        if owner is None or owner.type not in OWNER_TYPES or not owner.project_damage_cable_gen.enabled:
+        if owner is None or owner.type not in OWNER_TYPES:
+            continue
+        settings = owner.project_damage_cable_gen
+        if not settings.enabled or not (settings.live_update or force):
             continue
         try:
             build(bpy.context, owner, force=False)
@@ -633,15 +638,20 @@ def _dependencies(owner):
     return deps
 
 
+def _invalidate_owner_index():
+    from . import live
+    live.invalidate_index()
+
+
 @bpy.app.handlers.persistent
 def _depsgraph_changed(scene, depsgraph):
-    from . import live_input_state
+    from . import live, live_input_state
     if _building:
         return
     updates=[u for u in depsgraph.updates if u.is_updated_geometry or u.is_updated_transform]
     if not updates:return
-    for owner in scene.objects:
-        if owner.type not in OWNER_TYPES:continue
+    for owner in live._scan().cables:
+        if owner.name not in scene.objects or owner.type not in OWNER_TYPES:continue
         s=owner.project_damage_cable_gen
         if not s.enabled or not s.live_update:continue
         deps=_dependencies(owner)
@@ -654,6 +664,11 @@ def _depsgraph_changed(scene, depsgraph):
                 relevant.update(ob for ob in deps if isinstance(ob,bpy.types.Object) and ob.data==obj)
             elif isinstance(obj,bpy.types.Collection):queue(owner)
         for obj in relevant:
+            if obj == owner and owner.type == 'EMPTY':
+                # Proximity simulation starts at the Empty's world position.
+                if any(u.is_updated_transform and u.id.original == owner for u in updates):
+                    queue(owner)
+                continue
             if obj==owner and owner.mode=='OBJECT':
                 if any(u.is_updated_transform and u.id.original==owner for u in updates):continue
                 if not any(u.is_updated_geometry and u.id.original in {owner,owner.data} for u in updates):continue
@@ -935,6 +950,7 @@ def _source_row(layout):
 
 # показываем настройки выбранного эффекта
 def draw_settings(layout, context, show_sources=True):
+    from . import effect_layout
     owner = _target(context)
     if show_sources:_source_row(layout)
     if owner is None:
@@ -947,9 +963,8 @@ def draw_settings(layout, context, show_sources=True):
                         text='Proximity Cables from this Empty' if spawner else 'Cables from this Curve',
                         icon='EMPTY_DATA' if spawner else 'OUTLINER_DATA_CURVE')
         return
+    effect_layout.standalone_update(layout, s, 'project_damage.cable_gen_build')
     row = layout.row(align=True)
-    row.operator('project_damage.cable_gen_build', text='Update', icon='FILE_REFRESH')
-    row.prop(s, 'live_update', text='', icon='AUTO')
     row.operator('project_damage.cable_gen_apply', text='', icon='CHECKMARK')
     row.operator('project_damage.cable_gen_remove', text='', icon='TRASH')
 

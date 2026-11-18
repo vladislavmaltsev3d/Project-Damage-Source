@@ -4,16 +4,41 @@
 from pathlib import Path
 import importlib,os,pickle,sys,time,traceback
 
+def _resolve_package(package, path):
+    # Set up the namespace in this private process before unpickling any jobs.
+    if package.startswith('bl_ext.'):
+        import bpy
+
+        _, repository, _ = package.split('.')
+        directory = path.parent
+        repos = bpy.context.preferences.extensions.repos
+        repo = next((item for item in repos if item.module == repository), None)
+        if repo is not None and Path(repo.directory).resolve() != directory:
+            repos.remove(repo)
+            repo = None
+        if repo is None:
+            repos.new(name=repository, module=repository, custom_directory=str(directory), source='USER')
+        else:
+            repo.enabled = True
+    else:
+        sys.path.insert(0, str(path.parent))
+
+    spec = importlib.util.find_spec(package)
+    if spec is None or spec.origin is None or Path(spec.origin).resolve() != path / '__init__.py':
+        raise ImportError(f'Background process cannot load {package} from {path}')
+
 def main(folder,parent):
-                                                                                   
+
     pkg=Path(__file__).resolve().parent
-    sys.path.insert(0,str(pkg.parent));sys.path.insert(0,str(pkg))
+    package = os.environ.get('PD_WORKER_PACKAGE', pkg.name)
+    _resolve_package(package, pkg)
+    sys.path.insert(0,str(pkg))
     from background_wire import decode
     from exact_cache import Results
     results=Results();cache=None;cache_owner=None
-    allowed={'build_worn','grow_ivy','grow_roots','spray_foam','foam_path','scatter_grass','build_welds','compute_damage_shading','build_paper','apply_paper'}
+    allowed={'build_worn','grow_ivy','grow_roots','spray_foam','foam_path','scatter_grass','build_welds','compute_damage_shading','build_paper','apply_paper','build_rebar_surface_path'}
     tasks={'fabric_prep':{'prepare_with_mesh_prep','prepare_with_mesh_prep_fast'},'base_normals':{'compute_restore'},'python_jobs':{'compute'},'mesh_prep':{'prepare','is_closed_manifold'},'mesh_prep_fast':{'prepare','is_closed_manifold'},
-           'break_surface':{'compute_cut_surface'},
+           'break_surface':{'compute_cut_surface'},'cell_cut_plane':{'cut_mesh'},
            'cell_cuts':{'cut_paths'},'damage_shading':{'_rim_blend'},'input_prep':{'preserved_ngons'},'mesh_io':{'_scoped_shading'},'result_transfer':{'transfer_maps'},'inner_cutters':{'compute_interfaces','piece_maps'}}
     last=time.monotonic()
     while folder.is_dir():
@@ -48,8 +73,9 @@ def main(folder,parent):
                     result['incremental_reused']=cache.incremental_reused
                 if fn=='build_worn':result['intermediate_cache_hit']=hit
             else:
-                short=module.rsplit('.',1)[-1]
-                if fn not in tasks.get(short,()):raise ValueError('Invalid background task: '+fn)
+                task_package, _, short = module.rpartition('.')
+                if task_package != package or fn not in tasks.get(short,()):
+                    raise ValueError('Invalid background task: '+fn)
                 if not hit:result=getattr(importlib.import_module(module),fn)(*args,**kw)
             if can_memo and not hit:results.put(key,result)
             response=(True,result)
