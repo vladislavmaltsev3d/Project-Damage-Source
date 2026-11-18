@@ -8,17 +8,25 @@ OWNER = 'project_damage_cell_plane_source'
 HINT = ('Cut Plane is the most stable cutting mode: it uses an explicit mesh instead of projecting a drawing. '
         'Place the plane across the pieces, then edit or extrude its faces. Add Solidify for a wider cut. '
         'The cutter must cross a whole piece to split it. Closed, non-self-intersecting shards are required; '
-        'a partial cut leaves the piece unchanged. Live Update follows edits; otherwise press Update.')
+        'a partial cut leaves the piece unchanged. Live Update follows edits to the cutter. '
+        'With Live Update off, use Fracture Fills, Fracture Selected Fragments or Update in Cell Fracture.')
 
 
 def _poll(props, obj):
-    return obj.type == 'MESH' and obj != props.id_data and not obj.get('project_damage_cellf_of') and not obj.get('project_damage_result_of')
+    from . import ownership
+    return (obj.type == 'MESH' and obj != props.id_data
+            and not any(obj.get(stamp) for stamp in ownership.STAMPS + ownership.LOOSE_STAMPS)
+            and not obj.get('project_damage_bfrag_of'))
+
+
+def _plane_changed(props, context):
+    from . import physics_live
+    physics_live.changed(props, context)
 
 
 def register_props(cls):
-    from . import live
     cls.__annotations__['cellf_cut_plane'] = bpy.props.PointerProperty(
-        name='Cut Plane', type=bpy.types.Object, poll=_poll, update=live.touch_prop,
+        name='Cut Plane', type=bpy.types.Object, poll=_poll, update=_plane_changed,
         description='Editable mesh cutting existing shards. A flat or extruded sheet makes a narrow split; Solidify sets a wider removed slice')
 
 
@@ -117,15 +125,18 @@ def apply_steps(context, source, out, factor):
 
 
 def _source(context):
-    from . import ownership
+    from . import ownership, physics_workflow
     source = ownership.context_source(context)
-    return source if source is not None and source.type == 'MESH' and source.project_damage.cellf_enable else None
+    if source is None or source.type != 'MESH':
+        return None
+    if source.project_damage.cellf_enable or physics_workflow.supported(context, source):
+        return source
 
 
 class PROJECT_DAMAGE_OT_cell_cut_plane(bpy.types.Operator):
     bl_idname = 'project_damage.cell_cut_plane'
-    bl_label = 'Cell Fracture Cut Plane'
-    bl_description = 'Create or edit a wireframe mesh that cuts existing Cell Fracture shards'
+    bl_label = 'Fracture Cut Plane'
+    bl_description = 'Create or edit a wireframe mesh that splits fracture pieces'
     bl_options = {'REGISTER', 'UNDO'}
     action: bpy.props.EnumProperty(items=[(k,k.title(),'') for k in ('ADD','EDIT','SELECT','REMOVE','SOLIDIFY')], default='ADD')
 
@@ -134,12 +145,13 @@ class PROJECT_DAMAGE_OT_cell_cut_plane(bpy.types.Operator):
         return _source(context) is not None
 
     def execute(self, context):
-        from . import live, output_collections
+        from . import live, output_collections, physics_live
         source = _source(context)
         if source is None:
             return {'CANCELLED'}
         p = source.project_damage
         obj = p.cellf_cut_plane
+        physics_live.prime(context, source)
         if context.object and context.object.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
         previous = live._APPLYING
@@ -153,7 +165,9 @@ class PROJECT_DAMAGE_OT_cell_cut_plane(bpy.types.Operator):
                     bpy.data.objects.remove(obj, do_unlink=True)
                     if mesh.users == 0:
                         bpy.data.meshes.remove(mesh)
-                source.hide_set(False); source.select_set(True); context.view_layer.objects.active = source
+                from . import build
+                target = build.result_of(source) or source
+                target.hide_set(False); target.select_set(True); context.view_layer.objects.active = target
             else:
                 if obj is None:
                     if self.action != 'ADD':
@@ -182,18 +196,15 @@ class PROJECT_DAMAGE_OT_cell_cut_plane(bpy.types.Operator):
                     bpy.ops.object.mode_set(mode='EDIT')
         finally:
             live._APPLYING = previous
-        live.invalidate_index()
         if self.action in {'ADD','REMOVE','SOLIDIFY'}:
-            live._mark_dirty(source)
+            _plane_changed(p, context)
         return {'FINISHED'}
 
 
-def draw(layout, context, source):
-    from . import ui_image_hints
+def draw(layout, source, *, physics=False):
     p = source.project_damage
     row = layout.row(align=True)
     row.prop(p, 'cellf_cut_plane', text='Cutter')
-    ui_image_hints.button(row, 'cell_cut_plane')
     row = layout.row(align=True)
     if p.cellf_cut_plane is None:
         row.operator('project_damage.cell_cut_plane', text='Add Cut Plane', icon='MESH_PLANE').action = 'ADD'
@@ -208,6 +219,11 @@ def draw(layout, context, source):
         else:
             layout.operator('project_damage.cell_cut_plane', text='Add Solidify', icon='MOD_SOLIDIFY').action = 'SOLIDIFY'
     layout.label(text='Edit / extrude faces across the shards', icon='INFO')
+    if physics:
+        label = ('Live Update follows edits to the cutter' if p.live_update
+                 else 'Press Fracture to apply the plane')
+        layout.label(text=label, icon='INFO')
+        return
     error = source.get('project_damage_cell_plane_error', '')
     if error:
         import textwrap

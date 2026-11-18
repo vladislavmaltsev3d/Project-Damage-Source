@@ -1,0 +1,17 @@
+schema_version = "1.0.0"
+id = "project_damage"
+version = "1.0.0"
+name = "Project Damage | Procedural Destruction Toolkit"
+tagline = "Procedural damage and destruction effects for meshes"
+maintainer = "Lazy3D"
+type = "add-on"
+website = "https://github.com/vladislavmaltsev3d/Project-Damage-Source"
+blender_version_min = "4.2.0"
+license = ["SPDX:GPL-3.0-or-later"]
+platforms = ["macos-arm64"]
+
+[permissions]
+files = "Presets, material libraries, manual, and background job files"
+
+[build]
+paths_exclude_pattern = ["__pycache__/", "*.pyc", ".DS_Store", "_pending_update/", "_backups/", "package_install.log"]

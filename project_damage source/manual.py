@@ -92,7 +92,7 @@ _REPO_DEFAULT = os.path.abspath(os.path.join(_HERE, "..", "manual-site"))
                                                       
                                                                                  
                                                        
-_ADDON_LOCAL = os.path.join(_HERE, "manual-site")
+_ADDON_LOCAL = os.path.join(_HERE, "documentation")
 
                                                                        
                                                        

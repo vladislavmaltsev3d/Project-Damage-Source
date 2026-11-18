@@ -27,6 +27,7 @@ from . import preview_quality
 #            procedural "PD_Expanding Foam"
 from .blender_compat import uses_nodes
 from . import ui_image_hints
+from . import guide_timing
 import bpy
 import numpy as np
 from mathutils import Vector
@@ -220,7 +221,7 @@ def drawing_strokes(drawing, frame=None):
         for layer in drawing.data.layers:
             world=np.asarray(drawing.matrix_world @ layer.matrix_local,dtype=np.float64)
             if layer.hide:continue
-            fr=layer.current_frame() if frame is None else max((f for f in layer.frames if f.frame_number<=frame),key=lambda f:f.frame_number,default=None)
+            fr=guide_timing.frame(layer, guide_timing.uses_held_frame(drawing)) if frame is None else max((f for f in layer.frames if f.frame_number<=frame),key=lambda f:f.frame_number,default=None)
             if fr is None or fr.drawing is None:continue
             d=fr.drawing
             att=d.attributes.get('position')
@@ -291,7 +292,7 @@ def clear_pending():
 def dependencies_changed(scene, depsgraph):
     from . import live,build
                                                                          
-    if bpy.context.mode not in {'OBJECT','PAINT_GREASE_PENCIL','PAINT_GPENCIL'}:
+    if bpy.context.mode not in {'OBJECT','EDIT_CURVE','PAINT_GREASE_PENCIL','PAINT_GPENCIL'}:
         _DRAW_PENDING[0]=True
         return
     pending=_DRAW_PENDING[0];_DRAW_PENDING[0]=False
@@ -301,10 +302,10 @@ def dependencies_changed(scene, depsgraph):
     mesh_updates={u.id.original for u in depsgraph.updates if not isinstance(u.id,bpy.types.Object)
                   and u.is_updated_geometry}
     if not updated and not mesh_updates and not pending:return
-    for source in scene.objects:
-        if source.type!='MESH' or not source.project_damage.foam_enable or source.project_damage.all_off:
+    for source in live._scan().sources:
+        if not source.project_damage.foam_enable or source.project_damage.all_off or source.name not in scene.objects:
             continue
-        if not source.get('project_damage_uid') or source.get('project_damage_bfrag_stage'):continue
+        if source.get('project_damage_bfrag_stage'):continue
         target=build.result_of(source) or source
         watched={source,*input_objects(source,target)}
         watched.difference_update({source,target} & moving)
@@ -388,8 +389,6 @@ def _generate_steps(context, source, target, s, reports):
         previous=live._APPLYING;live._APPLYING=True
         try:s.placement='DRAW' if draw else 'GAPS'
         finally:live._APPLYING=previous
-    if draw and context.mode in {'PAINT_GREASE_PENCIL','PAINT_GPENCIL'} and context.active_object==s.drawing:
-        return generated_assets.output(source,'foam')
     if draw and not hasattr(core,'foam_path'):
         reports.append(({'ERROR'},'Expanding Foam: rebuild the native core and restart Blender to draw foam'))
         return None
@@ -491,7 +490,7 @@ def _generate_steps(context, source, target, s, reports):
 def _new_drawing(context, source):
     data=bpy.data.grease_pencils.new(source.name+'_FoamDrawing')
     layer=data.layers.new('Foam',set_active=True)
-    layer.frames.new(context.scene.frame_current)
+    layer.frames.new(guide_timing.FRAME)
     obj=bpy.data.objects.new(source.name+'_FoamDrawing',data)
     output_collections.link_object(context,source,obj)
     obj[DRAW_STAMP]=source.get('project_damage_uid','')
@@ -512,7 +511,7 @@ class PROJECT_DAMAGE_OT_foam_draw(bpy.types.Operator):
     action: bpy.props.EnumProperty(items=(
         ('NEW','Add New','Make a Grease Pencil drawing for the foam and start drawing'),
         ('DRAW','Draw','Draw foam strokes onto the object'),
-        ('DONE','Finish Drawing','Leave Draw mode without automatically rebuilding geometry'),
+        ('DONE','Finish Drawing','Leave Draw mode and let any pending live update finish'),
         ('CLEAR','Delete','Delete the linked drawing object'),
         ('UPDATE','Update','Finish drawing and rebuild foam from the current spline now')))
     source_name: bpy.props.StringProperty(options={'HIDDEN'})
@@ -575,7 +574,6 @@ class PROJECT_DAMAGE_OT_foam_draw(bpy.types.Operator):
         else:
             paint._activate(context,drawing)
             if not bpy.app.background:bpy.ops.object.mode_set(mode='EDIT')
-        self.report({'INFO'},'Draw on the object, then press Update to rebuild the foam')
         return {'FINISHED'}
 
 

@@ -264,20 +264,25 @@ class PROJECT_DAMAGE_OT_cell_cut_draw(bpy.types.Operator):
  bl_idname='project_damage.cell_cut_draw';bl_label='Draw Cell Fracture Cut';bl_options={'UNDO','INTERNAL'}
  mode:bpy.props.EnumProperty(items=(('THROUGH','Knife Through','Cut through the object, stopping at earlier crossing cuts'),('SURFACE','Knife Surface','Split only cells directly touched by this stroke'),('GUIDANCE','Guidance','Concentrate smaller cells around a separate guide drawing')),default='THROUGH')
  def execute(self,context):
-  from . import ownership,paint,live
+  from . import ownership,paint,live,physics_live
   source=ownership.context_source(context)
   if source is None or source.type!='MESH':return {'CANCELLED'}
+  physics_live.prime(context, source)
   p=source.project_damage;previous=live._APPLYING;live._APPLYING=True
   try:
    p.cellf_curve_type=self.mode
    p.cellf_draw_tool='GUIDANCE' if self.mode=='GUIDANCE' else 'CUT'
    if self.mode!='GUIDANCE':p.cellf_draw_mode=self.mode
   finally:live._APPLYING=previous
-  drawing=paint.ensure_cell_layer(context,source,self.mode)
-  if drawing.type=='GREASEPENCIL':paint._start_drawing(context,drawing)
-  else:
-   paint._activate(context,drawing)
-   if p.cellf_enable and drawing.type=='CURVE':bpy.ops.object.mode_set(mode='EDIT')
+  try:
+   drawing=paint.ensure_cell_layer(context,source,self.mode)
+   if drawing.type=='GREASEPENCIL':paint._start_drawing(context,drawing)
+   else:
+    paint._activate(context,drawing)
+    if drawing.type=='CURVE':bpy.ops.object.mode_set(mode='EDIT')
+  except RuntimeError as exc:
+   self.report({'WARNING'},str(exc))
+   return {'CANCELLED'}
   return {'FINISHED'}
 
 # подключаем свойства и действия этого модуля к Blender
@@ -287,10 +292,10 @@ def unregister():bpy.utils.unregister_class(PROJECT_DAMAGE_OT_cell_cut_draw)
 
 
 # рисунок хранится отдельно для сквозного ножа, поверхностного ножа и Guidance
-def draw_layers(layout,context,source):
+def draw_layers(layout,context,source,*,physics=False):
  from . import paint,material_controls
  p=source.project_damage
- box=layout.box();material_controls.centered_heading(box,'Fracture Drawing',icon='GREASEPENCIL')
+ box=layout.box();material_controls.centered_heading(box,'Fracture Cuts',icon='GREASEPENCIL')
  row=box.row(align=True);row.scale_y=1.5
  for kind,label,icon in (('GUIDANCE','Guidance','CURVE_PATH'),
                          ('THROUGH','Knife Through','SCULPTMODE_HLT'),
@@ -299,17 +304,18 @@ def draw_layers(layout,context,source):
    row.operator('project_damage.cell_cut_draw',text=label,icon=icon,depress=p.cellf_curve_type==kind).mode=kind
   else:
    row.prop_enum(p,'cellf_curve_type',kind,text=label,icon=icon)
- if p.cellf_enable:
-  row=box.row(align=True);row.scale_y=1.3
-  row.prop_enum(p,'cellf_curve_type','PLANE',text='Cut Plane',icon='MESH_PLANE')
-  from . import ui_image_hints
-  ui_image_hints.button(row,'cell_cut_plane')
+ row=box.row(align=True);row.scale_y=1.3
+ row.prop_enum(p,'cellf_curve_type','PLANE',text='Cut Plane',icon='MESH_PLANE')
+ from . import ui_image_hints
+ ui_image_hints.button(row,'cell_cut_plane',context)
  mode=p.cellf_curve_type
- if mode=='PLANE' and p.cellf_enable:
+ if mode=='PLANE':
   from . import cell_cut_plane
-  cell_cut_plane.draw(box,context,source)
+  cell_cut_plane.draw(box,source,physics=physics)
   return
  if mode not in paint.CELL_PROPS:mode='THROUGH'
+ if physics and p.live_update:
+  box.label(text='Edits update prepared pieces live',icon='INFO')
  prop=paint.CELL_PROPS[mode]
  target={'GUIDANCE':'CELLF_GUIDANCE','THROUGH':'CELLF','SURFACE':'CELLF_SURFACE'}[mode]
  row=box.row(align=True);row.prop(p,prop,text='Drawing')

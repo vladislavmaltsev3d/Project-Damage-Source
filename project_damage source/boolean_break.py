@@ -1,24 +1,6 @@
 # варианты Boolean Break, список каттеров и отдельные фрагменты
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Boolean Break tools (2026-10-26).
-
-* Variants. Boolean Break is offered as Boolean Break (the cut alone), Rebar,
-  Bricks, Wood Planks and Wood Framing. They are one effect with one set of
-  breakers: the variant only says what sits inside the break, so it is read
-  from and written to rebar_enable / rebar_fill (no stored state, older
-  scenes show the variant they already use).
-* Cutters. The breaker list gets an eyedropper (click an object in the
-  viewport), primitive cutters (cube, icosphere, ...) and a Delete button for
-  the Empties and primitives made here. Boolean Objects: every mesh of a
-  collection cuts, like the Boolean modifier's Collection operand. Its
-  members are mirrored into the breaker list (marked with a collection icon),
-  so the build, the cache and Live Update treat them like any linked cutter.
-* Separate Fragments. After each build, every loose part of the result that
-  is not the main body becomes its own object (origin at its centre of mass,
-  no parent), bound to the source like the other outputs. Apply All releases
-  them as ordinary objects.
-
-Python only: no core rebuild needed for any of this."""
+"""Boolean Break variants, per-instance cutter controls, and loose fragments."""
 from . import output_collections
 import random
 
@@ -27,6 +9,8 @@ import bpy
 import numpy as np
 from bpy.app.handlers import persistent
 from mathutils import Matrix, Vector
+
+from .exact_cache import Results
 
 from . import live, ownership
 
@@ -130,8 +114,19 @@ def variant_set(p, value):
         p.rebar_enable = True
 
 
-def variant_label(src):
-    return _SAVED_VARIANTS[variant_index(src.project_damage)][1]
+def variant_label(src, row=None):
+    from . import boolean_stack
+    p = boolean_stack.layer_props(src, row) if row is not None and row.get(boolean_stack.INSTANCE) else src.project_damage
+    return _SAVED_VARIANTS[variant_index(p)][1]
+
+
+def variant_row(src, kind):
+    from . import boolean_stack
+    if boolean_stack.SERIAL not in src:
+        return next((item for item in src.project_damage_effects if item.key == 'boolean'), None) if variant(src.project_damage) == kind else None
+    matches = [item for item in boolean_stack.rows(src) if variant(boolean_stack.layer_props(src, item)) == kind]
+    active = boolean_stack.edited(src)
+    return active if active in matches else next(reversed(matches), None)
 
 
 def _raw(layout):
@@ -143,14 +138,15 @@ def _raw(layout):
 
 def draw_tiles(grid, src, full, enabled, preview_icon, effect_name=lambda key, label: label, variant_filter=None):
     """The Add browser: one tile per variant instead of one Boolean Break tile."""
-    on = enabled(src, 'boolean')
-    current = variant_index(src.project_damage)
-    for i, (vid, label, tile_label, _, icon, _) in enumerate(VARIANTS):
+    from . import boolean_stack
+    for vid, label, tile_label, _, icon, _ in VARIANTS:
         if vid not in IMPORTABLE_VARIANTS:continue
         if variant_filter is not None and not variant_filter(vid):
             continue
         if vid == 'SIMPLE':
             label = effect_name('boolean', label)
+        entry = variant_row(src, vid)
+        active = entry is not None and enabled(src, 'boolean', entry)
         tile = grid.column(align=True)
         if full:
             card = tile.box()
@@ -161,17 +157,18 @@ def draw_tiles(grid, src, full, enabled, preview_icon, effect_name=lambda key, l
             row = tile.row(align=True)
             row.scale_y = 1.3
             row.operator_context = 'INVOKE_DEFAULT'
-            op = row.operator('project_damage.boolean_variant_add', text=label, depress=on and current == i)
+            op = row.operator('project_damage.boolean_variant_add', text=label, depress=active)
         else:
             tile.scale_y = 1.15
             row = tile.row(align=True)
             op = row.operator('project_damage.boolean_variant_add', text=tile_label, icon=icon,
-                               depress=on and current == i)
+                               depress=active)
         op.variant = vid
-        if current==i and any(item.key=='boolean' for item in src.project_damage_effects):
+        if entry is not None:
             remove=row.operator('project_damage.effect_action',text='',icon='X')
             remove.effect='boolean'
             remove.action='REMOVE'
+            remove.instance=entry.get(boolean_stack.INSTANCE, 0)
 
 
 def draw_variant_selector(layout, src):
@@ -215,7 +212,7 @@ class PROJECT_DAMAGE_OT_boolean_variant_add(bpy.types.Operator):
     @classmethod
     def description(cls, context, properties):
         v = next(v for v in VARIANTS if v[0] == properties.variant)
-        return 'Enable and select %s: %s. All variants share the breakers; one is active at a time' % (v[1], v[3].lower())
+        return 'Add %s with default settings and its own cutter list' % v[1]
 
     @classmethod
     def poll(cls, context):
@@ -229,34 +226,22 @@ class PROJECT_DAMAGE_OT_boolean_variant_add(bpy.types.Operator):
         return self.execute(context)
 
     def execute(self, context):
-        from . import sidebar, boolean_auto, live
+        from . import sidebar, boolean_stack, live, build, background_compute
         src = sidebar.source(context)
-        p = src.project_damage
+        background_compute.cancel(src)
                                                                         
                                                                         
-        auto_setup = (self.variant in boolean_auto.SUPPORTED and boolean_auto.preference_enabled(context)
-                      and not (p.ui_boolean_enable and variant(p) == self.variant
-                               and any(r.key == 'boolean' for r in src.project_damage_effects)))
-        if 'FINISHED' not in bpy.ops.project_damage.effect_action(effect='boolean', action='ADD'):
-            return {'CANCELLED'}
-        previous = live._APPLYING
-        live._APPLYING = True
-        try:
-            p.break_variant = self.variant
-            if auto_setup:
-                boolean_auto.setup_existing(context, src)
-        finally:
-            live._APPLYING = previous
+        boolean_stack.add(src, self.variant)
+        live.invalidate_index()
         live._mark_dirty(src)
-        if auto_setup and not self.defer_rebuild:
+        if not self.defer_rebuild and build.result_of(src) is not None:
                                                                            
                                                                              
-            from . import build
             result, reports = build.rebuild_object(context, src)
             for kind, message in reports:
                 self.report(kind, message)
             if result is None:
-                self.report({'WARNING'}, 'Inner layer configured; update again after resolving the reported mesh error')
+                self.report({'WARNING'}, 'Boolean Break added; update again after resolving the reported mesh error')
         return {'FINISHED'}
 
 
@@ -339,6 +324,7 @@ def primitive_material(obj):
 
 
 def link_cutter(src, obj):
+    from . import boolean_stack
     """Make `obj` a cutter of `src` (or select its row when it already is one)."""
     p = src.project_damage
     for i, row in enumerate(p.breakers):
@@ -357,7 +343,13 @@ def link_cutter(src, obj):
         row = p.breakers.add()
     row.obj = obj
     p.breaker_index = next(i for i, r in enumerate(p.breakers) if r.obj == obj)
-    p.ui_boolean_enable = True
+    active = boolean_stack.edited(src)
+    if active is not None:
+        active[boolean_stack.ON] = True
+        boolean_stack.refresh_master(src)
+    elif boolean_stack.SERIAL not in src:
+        p.ui_boolean_enable = True
+    live.invalidate_index()
     return True
 
 
@@ -598,7 +590,9 @@ class PROJECT_DAMAGE_MT_boolean_primitives(bpy.types.Menu):
 
 
 def _users(obj):
-    return [o for o in bpy.data.objects if o.type == 'MESH' and any(r.obj == obj for r in o.project_damage.breakers)]
+    from . import boolean_stack
+    return [source for source in bpy.data.objects if source.type == 'MESH'
+            and obj in boolean_stack.cutter_objects(source, include_disabled=True)]
 
 
 # действие «Delete Breaker»
@@ -628,7 +622,7 @@ class PROJECT_DAMAGE_OT_boolean_delete(bpy.types.Operator):
         p.breaker_index = max(0, min(i, len(p.breakers) - 1))
         if obj is not None:
             ours = obj.type == 'EMPTY' and obj.project_damage_breaker.is_breaker or obj.get(PRIMITIVE_KEY)
-            others = [o for o in _users(obj) if o != src]
+            others = _users(obj)
             if ours and not others:
                 mesh = obj.data if obj.type == 'MESH' else None
                 name = obj.name
@@ -693,6 +687,7 @@ def _has_flag(p):
 def sync_collection(src):
     """Mirror the Boolean Objects collection into flagged breaker rows.
     Returns True when the rows changed."""
+    from . import boolean_stack
     p = src.project_damage
     if not _has_flag(p):
         return False
@@ -711,14 +706,14 @@ def sync_collection(src):
             if getattr(rows[i], 'from_collection', False):
                 obj = rows[i].obj
                 rows.remove(i)
-                if obj is not None and obj not in want:
+                if obj is not None and obj not in want and not _users(obj):
                     _release_member(obj)
         for obj in want:
             _prepare_member(obj)
             row = rows.add()
             row.from_collection = True
             row.obj = obj
-        if want:
+        if want and boolean_stack.SERIAL not in src:
             p.ui_boolean_enable = True
         p.breaker_index = next((i for i, r in enumerate(rows) if r.obj == active and active is not None),
                                max(0, min(p.breaker_index, len(rows) - 1)))
@@ -756,7 +751,7 @@ def _sync_all(*_unused):
 
 def break_objects_changed(self, context):
     src = self.id_data
-    if src is not None and src.type == 'MESH' and not live._HISTORY_RESTORING:
+    if src is not None and src.type == 'MESH' and not live._HISTORY_RESTORING and not live._APPLYING:
         sync_collection(src)
     live.touch_prop(self, context)
 
@@ -816,14 +811,7 @@ def drop_fragments(source):
             bpy.data.collections.remove(coll)
 
 
-def _components(mesh):
-    """Per polygon, the index of its loose part (parts touching at a vertex
-    count as one), and the number of parts."""
-    nv, nf = len(mesh.vertices), len(mesh.polygons)
-    if nf == 0:
-        return np.zeros(0, dtype=np.int64), 0
-    edges = np.empty(len(mesh.edges) * 2, dtype=np.int64)
-    mesh.edges.foreach_get('vertices', edges)
+def _face_components(nv, first_vertex, edges):
     parent = list(range(nv))
 
     def find(i):
@@ -833,34 +821,57 @@ def _components(mesh):
         while parent[i] != root:
             parent[i], i = root, parent[i]
         return root
-    from .effect_groups import _weld_ids
-    weld = _weld_ids(mesh)
-    if weld is not None:
-        first = {}
-        for i, key in enumerate(weld):
-                                                                           
-            if int(key) < 0:
-                continue
-            other = first.setdefault(int(key), i)
-            ra, rb = find(i), find(other)
-            if ra != rb:
-                parent[max(ra, rb)] = min(ra, rb)
-    flat = edges.tolist()
-    for a, b in zip(flat[0::2], flat[1::2]):
+
+    for a, b in edges:
         ra, rb = find(a), find(b)
         if ra != rb:
             parent[max(ra, rb)] = min(ra, rb)
-    roots = np.fromiter((find(i) for i in range(nv)), dtype=np.int64, count=nv)
+    roots = np.fromiter((find(i) for i in first_vertex), dtype=np.int64, count=len(first_vertex))
+    labels, comp = np.unique(roots, return_inverse=True)
+    return comp.ravel(), len(labels)
+
+
+def _weld_links(mesh):
+    from .effect_groups import _weld_ids
+    weld = _weld_ids(mesh)
+    if weld is None:
+        return
+    coords = np.empty(len(weld) * 3, dtype=np.float32)
+    mesh.vertices.foreach_get('co', coords)
+    points = coords.reshape(-1, 3)
+    first = {}
+    displaced = {}
+    for i, key in enumerate(weld.tolist()):
+        if key < 0:
+            continue
+        other = first.setdefault(key, i)
+        if other == i:
+            continue
+        point = tuple(points[i])
+        if point != tuple(points[other]):
+            other = displaced.setdefault(key, {}).setdefault(point, i)
+        if other != i:
+            yield i, other
+
+
+def _components(mesh):
+    """Group polygons into loose parts, including the original shading-seam links."""
+    from itertools import chain
+    nv, nf = len(mesh.vertices), len(mesh.polygons)
+    if nf == 0:
+        return np.zeros(0, dtype=np.int64), 0
+    edges = np.empty(len(mesh.edges) * 2, dtype=np.int64)
+    mesh.edges.foreach_get('vertices', edges)
+    flat = edges.tolist()
     start = np.empty(nf, dtype=np.int64)
     mesh.polygons.foreach_get('loop_start', start)
     corner = np.empty(len(mesh.loops), dtype=np.int64)
     mesh.loops.foreach_get('vertex_index', corner)
-    labels, comp = np.unique(roots[corner[start]], return_inverse=True)
-    return comp.ravel(), len(labels)
+    return _face_components(nv, corner[start], chain(_weld_links(mesh), zip(flat[0::2], flat[1::2])))
 
 
-def _part_measures(mesh, comp, n):
-    """Per part: (|volume|, bounding box extent, centre of mass) in mesh space."""
+def _part_measures(mesh, comp, n, scale):
+    """Return local volume, scaled bounding-box extent and local centre of mass."""
     mesh.calc_loop_triangles()
     nt = len(mesh.loop_triangles)
     co = np.empty(len(mesh.vertices) * 3)
@@ -883,19 +894,23 @@ def _part_measures(mesh, comp, n):
         if not len(pts):
             out.append((0.0, 0.0, Vector()))
             continue
-        ext = float((pts.max(axis=0) - pts.min(axis=0)).max())
+        ext = float(((pts.max(axis=0) - pts.min(axis=0)) * scale).max())
         com = c_part[k] / v_part[k] if abs(v_part[k]) > 1e-15 else pts.mean(axis=0)
         out.append((abs(float(v_part[k])), ext, Vector(com)))
     return out
 
 
-def _main_parts(source, mesh, comp, n, measures):
+def _main_parts(source, mesh, comp, n, measures, source_geometry=None, factor=1.0):
     """The parts that stay in the result: the biggest part of each loose part
     of the source (a source made of several pieces keeps one body per piece)."""
     src_mesh = source.data
-    if not len(src_mesh.polygons):
-        return {int(np.argmax([m[0] for m in measures]))}
-    s_comp, s_n = _components(src_mesh)
+    if source_geometry is None:
+        s_comp, s_n = _components(src_mesh)
+    else:
+        points, polys = source_geometry
+        source_polys = polys.tolist()
+        edges = ((poly[0], corner) for poly in source_polys for corner in poly[1:])
+        s_comp, s_n = _face_components(len(points), polys[:, 0], edges)
     if s_n <= 1:
         return {int(np.argmax([m[0] for m in measures]))}
                                                                           
@@ -904,17 +919,28 @@ def _main_parts(source, mesh, comp, n, measures):
                                                                            
                                                                              
     from mathutils.bvhtree import BVHTree
-    tree = BVHTree.FromPolygons([v.co for v in src_mesh.vertices],
-                               [tuple(f.vertices) for f in src_mesh.polygons])
+    if source_geometry is None:
+        vertices = [v.co for v in src_mesh.vertices]
+        faces = [tuple(f.vertices) for f in src_mesh.polygons]
+    else:
+        vertices = points / factor
+        faces = [tuple(face[:3] if face[2] == face[3] else face) for face in source_polys]
+    tree = BVHTree.FromPolygons(vertices, faces)
     areas = np.empty(len(mesh.polygons), dtype=np.float64)
     centres = np.empty((len(mesh.polygons), 3), dtype=np.float64)
     mesh.polygons.foreach_get('area', areas)
     mesh.polygons.foreach_get('center', centres.ravel())
+    from .effect_groups import _face_values
+    base_faces = _face_values(mesh, 'surface_P', bool)
     order = np.argsort(comp, kind='stable')
     offsets = np.concatenate(([0], np.cumsum(np.bincount(comp, minlength=n))))
     best = {}
     for k in range(n):
         faces = order[offsets[k]:offsets[k + 1]]
+        if base_faces is not None:
+            traced = faces[base_faces[faces]]
+            if len(traced):
+                faces = traced
         weights = areas[faces]
         total = float(weights.sum())
         if not len(faces):
@@ -1003,87 +1029,152 @@ def _copy_shading(res, obj):
 
 
 def wanted(source):
+    return bool(_fragment_settings(source))
+
+
+def _fragment_settings(source):
+    from . import boolean_stack
     p = source.project_damage
-    return bool(getattr(p, 'break_separate', False) and p.ui_boolean_enable and not p.all_off
-                and any(r.obj is not None for r in p.breakers))
+    if p.all_off or not p.ui_boolean_enable:
+        return []
+    candidates = [props for _, props in boolean_stack.layers(source)] if boolean_stack.SERIAL in source else [p]
+    if not any(item.obj is not None for props in candidates for item in props.breakers):
+        return []
+    return [props.break_separate_min for props in candidates if props.break_separate]
 
 
-def after_build(context, source, res, reports=None):
+_split_plans = Results(limit=32 * 1024 * 1024)
+_SPLIT_PLAN = 'project_damage_bfrag_plan'
+_SPLIT_APPEARANCE = 'project_damage_bfrag_appearance'
+
+
+def clear_split_plans():
+    _split_plans.clear()
+
+
+def _separation_plan(context, source, res, threshold, source_geometry):
+    from . import effect_groups, incremental
+    from .params import unit_factor, _clamp_scale
+
+    mesh = res.data
+    scale = np.linalg.norm(np.asarray(res.matrix_world.to_3x3()), axis=0)
+    factor = unit_factor(context)
+    limit = max(0.0, threshold) * _clamp_scale(source.project_damage.global_scale / 100.0) / factor
+    if source_geometry is None:
+        # Apply Selected stages a finished result, so read its prepared source here.
+        from . import input_prep
+        prepared = input_prep.plan(context, source, factor)
+        if prepared is not None:
+            prep = prepared[1]
+            source_geometry = (prep.points, prep.polys)
+    base_faces = effect_groups._face_values(mesh, 'surface_P', bool)
+    inputs = (source_geometry if source_geometry is not None else
+              (incremental.geometry_arrays(source.data), effect_groups._weld_ids(source.data)))
+    key = _split_plans.key(__name__, '_separation_plan',
+                           (incremental.geometry_arrays(mesh), effect_groups._weld_ids(mesh),
+                            base_faces, inputs, scale, limit, factor), {})
+    found, plan = _split_plans.get(key)
+    if found:
+        return key, plan
+
+    comp, count = _components(mesh)
+    plan = None
+    if count > 1:
+        measures = _part_measures(mesh, comp, count, scale)
+        keep = _main_parts(source, mesh, comp, count, measures, source_geometry, factor)
+        parts = [k for k in range(count) if k not in keep and measures[k][1] >= limit]
+        if parts:
+            parts.sort(key=lambda k: -measures[k][0])
+            fragment_index = np.zeros(count, dtype=np.int32)
+            fragment_index[parts] = np.arange(1, len(parts) + 1, dtype=np.int32)
+            plan = fragment_index[comp], [tuple(measures[k][2]) for k in parts]
+    _split_plans.put(key, plan)
+    return key, plan
+
+
+def after_build(context, source, res, reports=None, *, source_geometry=None):
     """build.rebuild_object calls this once the result is placed: the loose
     parts of the result that are not the main body become fragment objects."""
     if source is None or source.get(STAGE_KEY):
         return []
-    if res is None or res.type != 'MESH' or not wanted(source):
+    thresholds = _fragment_settings(source)
+    if res is None or res.type != 'MESH' or not thresholds:
         drop_fragments(source)
         return []
     uid = source.get('project_damage_uid')
     mesh = res.data
     from . import effect_groups
+    cuts = effect_groups._face_values(mesh, 'break_P', bool)
+    if cuts is None or not cuts.any():
+        drop_fragments(source)
+        return []
     split_valid = effect_groups._weld_ids(mesh) is not None
-    comp, n = _components(mesh)
-    if n <= 1:
+    key, plan = _separation_plan(context, source, res, min(thresholds), source_geometry)
+    if plan is None:
         drop_fragments(source)
         return []
-    measures = _part_measures(mesh, comp, n)
-    keep = _main_parts(source, mesh, comp, n, measures)
-    from .params import unit_factor, _clamp_scale
-    p = source.project_damage
-    limit = (max(0.0, getattr(p, 'break_separate_min', 1.0)) * _clamp_scale(p.global_scale / 100.0)
-             / unit_factor(context))
-    parts = [k for k in range(n) if k not in keep and measures[k][1] >= limit]
-    if not parts:
-        drop_fragments(source)
-        return []
-    parts.sort(key=lambda k: -measures[k][0])
+    from . import incremental
+    labels, centres = plan
+    plan_id = key.hex() if key is not None else ''
+    groups = tuple(g.name for g in res.vertex_groups)
+    weights = [(v.index, g.group, g.weight) for v in mesh.vertices for g in v.groups] if groups else ()
+    appearance = format(incremental.digest((incremental.mesh_state(mesh), groups, weights)), 'x')
     bm = bmesh.new()
     bm.from_mesh(mesh)
-    old = fragments_of(source)
+    old = {obj.get('project_damage_bfrag_index', 0): obj for obj in fragments_of(source)}
     coll = _fragment_collection(context, source, res)
     materials = list(mesh.materials)
-    groups = [g.name for g in res.vertex_groups]
     out = []
-    for j, k in enumerate(parts, 1):
+    for j, center in enumerate(centres, 1):
         name = '%s_frag_%03d' % (source.name, j)
-        sub = _sub_mesh(bm, comp == k, name, materials)
-        _fragment_metadata(mesh, sub, split_valid)
-        com = measures[k][2]
-        sub.transform(Matrix.Translation(-com))
-        sub.update()
-        if j - 1 < len(old):
-            obj = old[j - 1]
-            previous = obj.data
-            obj.data = sub
-            if previous is not None and previous.users == 0:
-                bpy.data.meshes.remove(previous)
-            obj.vertex_groups.clear()
-        else:
-            obj = bpy.data.objects.new(name, sub)
+        com = Vector(center)
+        obj = old.pop(j, None)
+        same_shape = bool(plan_id and obj is not None and obj.get(_SPLIT_PLAN) == plan_id)
+        same_mesh = same_shape and obj.get(_SPLIT_APPEARANCE) == appearance
+        if not same_mesh:
+            sub = _sub_mesh(bm, labels == j, name, materials)
+            _fragment_metadata(mesh, sub, split_valid)
+            sub.transform(Matrix.Translation(-com))
+            sub.update()
+            if obj is None:
+                obj = bpy.data.objects.new(name, sub)
+            else:
+                previous = obj.data
+                obj.data = sub
+                if previous is not None and previous.users == 0:
+                    bpy.data.meshes.remove(previous)
+                obj.vertex_groups.clear()
+            for g in groups:
+                obj.vertex_groups.new(name=g)
         if obj.name not in coll.objects:
             for c in list(obj.users_collection):
                 c.objects.unlink(obj)
             coll.objects.link(obj)
         obj.name = name
-        sub.name = obj.name
-        for g in groups:
-            obj.vertex_groups.new(name=g)
+        obj.data.name = obj.name
         for key in (effect_groups.OWNED, 'project_damage_damage_materials'):
             if key in res:
                 obj[key] = dict(res[key])
-        obj.parent = None
-        obj.matrix_world = res.matrix_world @ Matrix.Translation(com)
+        if not same_shape:
+            obj.parent = None
+            obj.matrix_world = res.matrix_world @ Matrix.Translation(com)
         obj[FRAGMENT_STAMP] = uid
+        obj[_SPLIT_PLAN] = plan_id
+        obj[_SPLIT_APPEARANCE] = appearance
         obj['project_damage_fragment_of'] = res.name                                                      
         obj['project_damage_bfrag_index'] = j
         obj['project_damage_bfrag_com'] = list(com)
-        obj['project_damage_bfrag_rest']=[float(v) for row in (source.matrix_world.inverted_safe()@obj.matrix_world) for v in row]
+        if not same_shape:
+            obj['project_damage_bfrag_rest']=[float(v) for row in (source.matrix_world.inverted_safe()@obj.matrix_world) for v in row]
         ownership.bind(source, obj)
         obj.hide_render = res.hide_render
-        _copy_shading(res, obj)
+        if not same_mesh:
+            _copy_shading(res, obj)
         out.append(obj)
-    for obj in old[len(out):]:
+    for obj in old.values():
         _remove(obj)
                                                                    
-    stay = ~np.isin(comp, parts)
+    stay = labels == 0
     bm.faces.ensure_lookup_table()
     drop = [f for f, s in zip(bm.faces, stay) if not s]
     bmesh.ops.delete(bm, geom=drop, context='FACES')
@@ -1099,16 +1190,20 @@ def after_build(context, source, res, reports=None):
     return out
 
 
-def follow_source(source):
+def follow_source(source, *, timeline=False):
     """A transform-only move of the source carries its fragments along."""
     from . import pipes
     pipes.follow_source(source)
     from . import cables
     cables.follow_source(source)
     for obj in fragments_of(source):
+        if timeline and (obj.rigid_body is not None or obj.animation_data is not None or obj.constraints):
+            continue
         com = obj.get('project_damage_bfrag_com')
         if com is not None and len(com) == 3:
-            obj.matrix_world = source.matrix_world @ Matrix.Translation(Vector(com))
+            matrix = source.matrix_world @ Matrix.Translation(Vector(com))
+            if obj.matrix_world != matrix:
+                obj.matrix_world = matrix
 
 
 def after_apply_selected(context, source):
@@ -1141,7 +1236,9 @@ def draw_fragments(layout, src, physics=False):
             col.prop(p,'frame_restructure_minimum')
             col.prop(p,'frame_restructure_collisions',toggle=True,icon='MOD_BOOLEAN')
             from .rebar import rebar_of
-            output=rebar_of(src)
+            from . import boolean_stack
+            entry=boolean_stack.edited(src)
+            output=rebar_of(src, boolean_stack.OUTPUT_OFFSET + entry[boolean_stack.INSTANCE] if entry else 0)
             if output is not None and 'pd_framing_broken_members' in output:
                 settings.label(text='%d broken members / %d protected connections' %
                     (output['pd_framing_broken_members'], output['pd_framing_kept_connections']),icon='INFO')

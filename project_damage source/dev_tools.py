@@ -339,7 +339,7 @@ def button(layout, text, action, icon='NONE'):
 
 def export_snapshot(context):
     """Portable, declarative AI handoff; no mesh data or executable scripts."""
-    from . import sidebar, bl_info
+    from . import core_loader, sidebar
     src, selected_key = selected(context)
     preferences = json.loads(json.dumps(data()))
     ordered = preferences['layout'].get('order', [])
@@ -373,7 +373,7 @@ def export_snapshot(context):
             value = getattr(src.project_damage,name)
             values[name] = list(value) if getattr(prop,'is_array',False) or isinstance(value,set) else value
     return {'format':'project_damage_ui_handoff', 'schema':1,
-            'addon_version':'.'.join(map(str,bl_info['version'])),
+            'addon_version':core_loader.addon_version(),
             'blender_version':bpy.app.version_string,
             'exported_at_utc':datetime.now(timezone.utc).isoformat(),
             'preferences':preferences,
@@ -477,7 +477,7 @@ class PROJECT_DAMAGE_OT_export_defaults_txt(bpy.types.Operator, ExportHelper):
 class OBJECT_PT_project_damage_dev_tools(bpy.types.Panel):
     bl_label = 'DEV TOOLS'
     bl_idname = 'OBJECT_PT_project_damage_dev_tools'
-    bl_parent_id = 'OBJECT_PT_project_damage_settings'
+    bl_parent_id = 'OBJECT_PT_project_damage_settings_ordered'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "⚒ Project Damage"

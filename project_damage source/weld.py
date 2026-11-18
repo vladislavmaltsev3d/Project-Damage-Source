@@ -6,7 +6,8 @@ from . import preview_quality
 # Weld Edges: weld beads (core: weld.cpp) as their own object "<object>_Welds".
 #   Edges     corners sharper than Angle - inside (fillet welds), outside or
 #             both - limited to the Mask vertex group (weight >= Threshold on
-#             both ends); no group = every such edge
+#             both ends); no group = every such edge. On Edges uses the exact
+#             edge-domain mask on the source mesh.
 #   Drawn     Grease Pencil strokes dropped on the surface: a bead anywhere
 #   Bead      Width / Height, ripples (Pitch, Ripple Height, Curvature),
 #             Wobble (also spatter); UV map "UVMap" (U along in Width units,
@@ -17,9 +18,9 @@ from .blender_compat import enable_nodes, uses_nodes
 import bpy
 from . import material_controls
 import numpy as np
-from mathutils import Vector
-
 from . import core_loader
+
+EDGE_MASK = 'project_damage_weld_edges'
 
 
 def _poll_gp(self, obj):
@@ -30,7 +31,10 @@ def _poll_gp(self, obj):
 class ProjectDamageWeldSettings(bpy.types.PropertyGroup):
     mask_group: bpy.props.StringProperty(name='Mask', description='Vertex group: only edges whose both ends weigh at least the Threshold get a weld. Empty: every matching edge')
     mask_threshold: bpy.props.FloatProperty(name='Threshold', default=0.5, min=0.0, max=1.0)
-    edges_enable: bpy.props.BoolProperty(name='Edge Welds', default=True)
+    on_edges: bpy.props.BoolProperty(
+        name='On Edges',
+        description='Also weld the exact edges added with Assign to Weld Mask, including flat and open edges')
+    edges_enable: bpy.props.BoolProperty(name='Edge Welds', default=False)
     edge_type: bpy.props.EnumProperty(name='Edges', items=(('0', 'Inside Corners', 'Fillet welds in concave corners'), ('1', 'Outside Corners', 'Beads on convex edges'), ('2', 'Both', 'Every corner')), default='1')
     angle: bpy.props.FloatProperty(name='Angle', default=30.0, min=1.0, max=179.0, description='Corners sharper than this (degrees) get a weld')
     strokes_enable: bpy.props.BoolProperty(name='Drawn Welds', default=True)
@@ -63,46 +67,12 @@ def generate(context,source,target,s,reports):
         return generated_assets.output(source,'weld')
     return bg.immediate(_generate_steps(context,source,target,s,reports))
 
-def _generate_steps(context, source, target, s, reports):
-    from . import background_compute as bg
-    core = core_loader.load()
-    if core is None or not hasattr(core, 'build_welds'):
-        reports.append(({'ERROR'}, 'Weld Edges: the native core has no weld generator (rebuild the core)'))
-        return None
-                                                                          
-    deps = context.evaluated_depsgraph_get()
-    ev = target.evaluated_get(deps)
-    me = ev.to_mesh()
-    try:
-        n = len(me.vertices)
-        co = np.empty(n * 3, dtype=np.float64)
-        me.vertices.foreach_get('co', co)
-        ls = np.empty(len(me.polygons), dtype=np.int64); me.polygons.foreach_get('loop_start', ls)
-        lt = np.empty(len(me.polygons), dtype=np.int64); me.polygons.foreach_get('loop_total', lt)
-        lv = np.empty(len(me.loops), dtype=np.int64); me.loops.foreach_get('vertex_index', lv)
-        weights = np.zeros(0, dtype=np.float32)
-        group = target.vertex_groups.get(s.mask_group) if s.mask_group else None
-        if group is not None:
-            weights = np.zeros(n, dtype=np.float32)
-            gi = group.index
-            for v in me.vertices:
-                for g in v.groups:
-                    if g.group == gi:
-                        weights[v.index] = g.weight
-                        break
-        if group is None and s.mask_group and target!=source:
-            original=source.vertex_groups.get(s.mask_group)
-            if original is not None and len(source.data.vertices):
-                from mathutils.kdtree import KDTree
-                tree=KDTree(len(source.data.vertices));transform=target.matrix_world.inverted_safe() @ source.matrix_world
-                source_weights=[]
-                for v in source.data.vertices:
-                    tree.insert(transform @ v.co,v.index)
-                    source_weights.append(next((g.weight for g in v.groups if g.group==original.index),0.))
-                tree.balance()
-                weights=np.asarray([source_weights[tree.find(q)[1]] for q in co.reshape(-1,3)],dtype=np.float32)
-    finally:
-        ev.to_mesh_clear()
+def _mesh_arrays(me):
+    points = np.empty((len(me.vertices), 3), dtype=np.float64)
+    me.vertices.foreach_get('co', points.ravel())
+    ls = np.empty(len(me.polygons), dtype=np.int64); me.polygons.foreach_get('loop_start', ls)
+    lt = np.empty(len(me.polygons), dtype=np.int64); me.polygons.foreach_get('loop_total', lt)
+    lv = np.empty(len(me.loops), dtype=np.int64); me.loops.foreach_get('vertex_index', lv)
     polys = []
     for a, t in zip(ls.tolist(), lt.tolist()):
         ring = lv[a:a + t].tolist()
@@ -113,16 +83,94 @@ def _generate_steps(context, source, target, s, reports):
         else:                                                              
             for k in range(1, t - 1):
                 polys.append([ring[0], ring[k], ring[k + 1], ring[k + 1]])
-    points = np.ascontiguousarray(co.reshape(-1, 3))
-    polys = np.ascontiguousarray(np.array(polys, dtype=np.int32).reshape(-1, 4))
-    from . import paint
-    to_local = target.matrix_world.inverted_safe()
+    return points, np.asarray(polys, dtype=np.int32).reshape(-1, 4)
+
+
+def _weights(source, target, mesh, points, group_name):
+    group = target.vertex_groups.get(group_name)
+    if group is not None:
+        weights = np.zeros(len(points), dtype=np.float32)
+        for vertex in mesh.vertices:
+            weights[vertex.index] = next((g.weight for g in vertex.groups if g.group == group.index), 0.0)
+        return weights
+    original = source.vertex_groups.get(group_name) if target != source else None
+    if original is None or not len(source.data.vertices):
+        return np.empty(0, dtype=np.float32)
+    from mathutils.kdtree import KDTree
+    vertices = source.data.vertices
+    tree = KDTree(len(vertices))
+    transform = target.matrix_world.inverted_safe() @ source.matrix_world
+    source_weights = []
+    for vertex in vertices:
+        tree.insert(transform @ vertex.co, vertex.index)
+        source_weights.append(next((g.weight for g in vertex.groups if g.group == original.index), 0.0))
+    tree.balance()
+    return np.asarray([source_weights[tree.find(point)[1]] for point in points], dtype=np.float32)
+
+
+def _masked_edges(mesh):
+    mask = mesh.attributes.get(EDGE_MASK)
+    if mask is None or mask.domain != 'EDGE' or mask.data_type != 'INT':
+        return np.empty((0, 2), dtype=np.int32)
+    selected = np.empty(len(mesh.edges), dtype=np.int32)
+    mask.data.foreach_get('value', selected)
+    edges = np.empty((len(mesh.edges), 2), dtype=np.int32)
+    mesh.edges.foreach_get('vertices', edges.ravel())
+    return edges[selected != 0]
+
+
+def _matching_edges(mesh, points, edge_points, edge_selection, to_local):
+    """Find edges shared by the original mesh and the evaluated damage mesh."""
+    from mathutils.kdtree import KDTree
+
+    if not len(points):
+        return np.empty((0, 2), dtype=np.int32)
+    tree = KDTree(len(points))
+    for i, point in enumerate(points):
+        tree.insert(point, i)
+    tree.balance()
+    originals = np.unique(edge_selection)
+    mapped = edge_points[originals] @ to_local[:3, :3].T + to_local[:3, 3]
+    tolerance = max(1e-6, float(np.max(np.abs(mapped))) * 2e-7)
+    neighbors = {}
+    for a, b in edge_selection:
+        neighbors.setdefault(a, set()).add(b)
+        neighbors.setdefault(b, set()).add(a)
+    matches = {}
+    for i, point in zip(originals, mapped):
+        for _, vertex_index, _ in tree.find_range(point, tolerance):
+            matches.setdefault(vertex_index, set()).add(i)
+    edges = np.empty((len(mesh.edges), 2), dtype=np.int32)
+    mesh.edges.foreach_get('vertices', edges.ravel())
+    overlap = [(a, b) for a, b in edges if a in matches and b in matches
+               and any(neighbors[i] & matches[b] for i in matches[a])]
+    return np.asarray(overlap, dtype=np.int32).reshape(-1, 2)
+
+
+def _generate_steps(context, source, target, s, reports):
+    from . import background_compute as bg, paint
+    core = core_loader.load()
+    if core is None or not hasattr(core, 'build_welds'):
+        reports.append(({'ERROR'}, 'Weld Edges: the native core has no weld generator (rebuild the core)'))
+        return None
+    if not s.is_property_set('edges_enable'):
+        s['edges_enable'] = s.edges_enable
+    on_edges = s.on_edges
+    mask_group = s.mask_group
+    has_group = bool(mask_group and (mask_group in target.vertex_groups or mask_group in source.vertex_groups))
+    automatic_edges = s.edges_enable and (not on_edges or has_group)
+    edge_selection = _masked_edges(source.data) if on_edges else None
+    has_selected_edges = edge_selection is not None and len(edge_selection) > 0
+    if has_selected_edges:
+        edge_points, edge_polys = _mesh_arrays(source.data)
+        source_world = np.asarray(source.matrix_world, dtype=np.float64)
+        edge_points = np.ascontiguousarray(edge_points @ source_world[:3, :3].T + source_world[:3, 3])
+
+    to_local = np.asarray(target.matrix_world.inverted_safe(), dtype=np.float64)
     world = np.asarray(target.matrix_world, dtype=np.float64)
-    points = np.ascontiguousarray(points @ world[:3,:3].T + world[:3,3])
-    strokes = paint.read_paths(context, target, source.project_damage.weld_drawing)
+    strokes = paint.read_paths(context, target, source.project_damage.weld_drawing) if s.strokes_enable else []
     strokes = [np.ascontiguousarray(path @ world[:3,:3].T + world[:3,3]) for path in strokes]
     scale = 1.0 / max(source.project_damage.global_scale / 100.0, 0.0001)
-    up = Vector((0.0, 0.0, 1.0))
     p = core.WeldParams()
     p.seed = (s.seed + source.project_damage.seed) % 2147483647
     p.edges_enable = s.edges_enable
@@ -140,14 +188,46 @@ def _generate_steps(context, source, target, s, reports):
     p.sides = s.sides
     p.detail = max(0.01, s.detail * (preview_quality.percent(source.project_damage) / 100.0))
     p.uv_scale = s.uv_scale
-    r = yield from bg.native(core,'build_welds',points, polys, weights, strokes, p, **surface_guidance.kwargs(core))
-    wp, wf, wuv, prof = r['points'], r['polys'], r['uvs'], r['profile']
-    inv = np.asarray(to_local, dtype=np.float64)
-    wp = wp @ inv[:3,:3].T + inv[:3,3]
-    name = source.name + '_project_damage_weld'
-    if len(wf) == 0:
-        reports.append(({'WARNING'}, 'Weld Edges: no weld (check the Mask group, the Angle and the Edges type, or draw strokes)'))
+    results = []
+    guide = surface_guidance.kwargs(core)
+    no_weights = np.empty(0, dtype=np.float32)
+    if automatic_edges or strokes:
+        options = dict(guide)
+        ev = target.evaluated_get(context.evaluated_depsgraph_get())
+        me = ev.to_mesh()
+        try:
+            points, polys = _mesh_arrays(me)
+            weights = _weights(source, target, me, points, mask_group) if automatic_edges and has_group else no_weights
+            if automatic_edges and has_selected_edges:
+                options['edge_exclusion'] = _matching_edges(me, points, edge_points, edge_selection, to_local)
+        finally:
+            ev.to_mesh_clear()
+        points = np.ascontiguousarray(points @ world[:3, :3].T + world[:3, 3])
+        p.edges_enable = automatic_edges
+        results.append((yield from bg.native(core, 'build_welds', points, polys, weights, strokes, p, **options)))
+    if has_selected_edges:
+        p.edges_enable = True
+        p.strokes_enable = False
+        results.append((yield from bg.native(core, 'build_welds', edge_points, edge_polys, no_weights, [], p,
+                                            edge_selection=edge_selection, **guide)))
+    results = [r for r in results if len(r['polys'])]
+    if not results:
+        message = ('Weld Edges: select edges in Edit Mask, then use Assign to Weld Mask' if on_edges
+                   else 'Weld Edges: no weld (check the Mask group, the Angle and the Edges type, or draw strokes)')
+        reports.append(({'WARNING'}, message))
         return None
+    r = results[0]
+    wp, wf, wuv, prof = r['points'], r['polys'], r['uvs'], r['profile']
+    beads = r['beads']
+    if len(results) == 2:
+        edges = results[1]
+        wf = np.concatenate((wf, edges['polys'] + len(wp)))
+        wp = np.concatenate((wp, edges['points']))
+        wuv = np.concatenate((wuv, edges['uvs']))
+        prof = np.concatenate((prof, edges['profile']))
+        beads += edges['beads']
+    wp = wp @ to_local[:3, :3].T + to_local[:3, 3]
+    name = source.name + '_project_damage_weld'
     mesh = bpy.data.meshes.new(name)
     mesh.vertices.add(len(wp))
     mesh.vertices.foreach_set('co', wp.astype(np.float32).ravel())
@@ -172,7 +252,7 @@ def _generate_steps(context, source, target, s, reports):
     mesh.materials.append(mat)
     from . import generated_assets
     obj = generated_assets.place(context, source, target, 'weld', mesh)
-    reports.append(({'INFO'}, 'Weld Edges: %d welds' % r['beads']))
+    reports.append(({'INFO'}, 'Weld Edges: %d welds' % beads))
     return obj
 
 
@@ -298,14 +378,18 @@ class PROJECT_DAMAGE_PT_weld(bpy.types.Panel):
     def draw(self, context):
         from . import build,ownership
         layout=self.layout;obj=context.active_object;s=obj.project_damage_weld
-        box=layout.box();box.prop(s,'edges_enable');column=box.column(align=True);column.enabled=s.edges_enable
-        mask_target=obj
-        column.prop_search(s,'mask_group',mask_target,'vertex_groups',text='Mask')
+        box=layout.box();box.label(text='Enable to spawn on all edges');box.prop(s,'edges_enable')
+        column=box.column(align=True)
+        column.prop_search(s,'mask_group',obj,'vertex_groups',text='Vertex Group')
         column.prop(s,'mask_threshold')
         row=column.row(align=True)
         row.operator('project_damage.weld_mask',text='Paint Mask',icon='BRUSH_DATA').action='PAINT'
         row.operator('project_damage.weld_mask',text='Edit Mask',icon='EDITMODE_HLT').action='EDIT'
-        if bpy.context.mode=='EDIT_MESH':column.operator('project_damage.weld_mask',text='Assign to Weld Mask',icon='CHECKMARK').action='ASSIGN'
+        row.prop(s,'on_edges',toggle=True)
+        if bpy.context.mode=='EDIT_MESH':
+            column.operator('project_damage.weld_mask',text='Assign to Weld Mask',icon='CHECKMARK').action='ASSIGN'
+            if s.on_edges:
+                column.operator('project_damage.weld_mask',text='Clear Edge Mask',icon='TRASH').action='CLEAR_EDGES'
         if bpy.context.mode in {'EDIT_MESH','PAINT_WEIGHT'}:column.operator('project_damage.weld_mask',text='Finish Mask',icon='CHECKMARK').action='FINISH'
         column.prop(s,'edge_type',expand=True);column.prop(s,'angle')
         box=layout.box();box.prop(s,'strokes_enable');column=box.column(align=True);column.enabled=s.strokes_enable
@@ -325,6 +409,18 @@ class PROJECT_DAMAGE_PT_weld(bpy.types.Panel):
 _SETTINGS = ProjectDamageWeldSettings
 _PANEL = PROJECT_DAMAGE_PT_weld
 
+
+@bpy.app.handlers.persistent
+def _restore_existing_default(_unused):
+    from . import generated_assets
+    for obj in bpy.data.objects:
+        if obj.type != 'MESH' or not obj.is_editable or not obj.project_damage.weld_enable:
+            continue
+        settings = obj.project_damage_weld
+        if not settings.is_property_set('edges_enable') and generated_assets.output(obj, 'weld') is not None:
+            settings['edges_enable'] = True
+
+
 # подключаем свойства и действия этого модуля к Blender
 def register():
     from . import live, generated_assets
@@ -332,9 +428,12 @@ def register():
         prop.keywords['update'] = generated_assets.material_changed if name == 'material' else live.touch_prop
     bpy.utils.register_class(_SETTINGS)
     bpy.types.Object.project_damage_weld = bpy.props.PointerProperty(type=_SETTINGS)
+    bpy.app.handlers.load_post.append(_restore_existing_default)
 
 # убираем подключения модуля при выключении аддона
 def unregister():
+    if _restore_existing_default in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_restore_existing_default)
     if hasattr(bpy.types.Object, 'project_damage_weld'):
         del bpy.types.Object.project_damage_weld
     if _SETTINGS.is_registered:

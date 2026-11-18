@@ -47,18 +47,19 @@ import random
 from functools import wraps
 
 import bmesh
+from . import guide_timing
 import bpy
 import numpy as np
 from mathutils import Matrix, Vector
 
 from . import build, live, ownership, physics_workflow
 
-FILL_STAMP = 'project_damage_fill_of'                                       
-FILL_KIND = 'project_damage_fill_kind'                                                  
+FILL_STAMP = 'project_damage_fill_of'
+FILL_KIND = 'project_damage_fill_kind'
 FILL_COLLECTION = 'project_damage_fill_collection'
-PIECE_STAMP = 'project_damage_fill_piece_of'                                   
+PIECE_STAMP = 'project_damage_fill_piece_of'
 PIECE_COLLECTION = 'project_damage_fill_piece_collection'
-SPLIT_STAMP = 'project_damage_split_piece_of'                                       
+SPLIT_STAMP = 'project_damage_split_piece_of'
 INNER_DEFAULT = 'ProjectDamage_FillInner'
 MODULES = ('hit', 'concrete', 'lath', 'brick', 'edge', 'corner', 'surface', 'fracture', 'bead', 'piles', 'deposits',
            'bullet', 'hang', 'boolean', 'dbevel', 'erosion')
@@ -67,16 +68,16 @@ LABELS = {'hit': 'Concrete Hit', 'concrete': 'Concrete Damage', 'lath': 'Lath', 
           'bead': 'Bead', 'piles': 'Corner Piles', 'deposits': 'Deposits',
           'bullet': 'Bullet Impacts', 'hang': 'Hanging Rebar Holes',
           'boolean': 'Boolean Break', 'dbevel': 'Damaged Bevel', 'erosion': 'Voxel Erosion'}
-                                                                          
-                                                                           
-                                                                             
-                                                                         
-             
+
+
+
+
+
 EFFECT_IDS = {'edge': (1,), 'corner': (2,), 'surface': (3,), 'fracture': (4,),
               'bead': (5,), 'piles': (28,), 'deposits': (29,),
-                                                                                                       
+
               'bullet': (15,), 'hang': (26, 23),
-              'boolean': (23,), 'dbevel': (21,), 'erosion': (32,)}                                     
+              'boolean': (23,), 'dbevel': (21,), 'erosion': (32,)}
 ADDITIVE = ('bead', 'piles', 'deposits')
 ENABLE_PROP = {'edge': 'chips_enable', 'corner': 'corner_enable', 'surface': 'surf_enable',
                'fracture': 'fract_enable', 'bead': 'build_enable', 'piles': 'pile_enable',
@@ -96,17 +97,19 @@ def _operation(fn=None, *, weld=True):
     def run(context, source, *args, **kwargs):
         global _OPERATION_DEPTH
         from . import background_compute
-        background_compute.cancel(source)
+        preview = kwargs.get('live_preview', False)
+        if not preview:
+            background_compute.cancel(source)
         previous = live._APPLYING
         live._APPLYING = True
         _OPERATION_DEPTH += 1
         try:
             from . import effect_groups, boolean_break
             from contextlib import ExitStack
-                                                                               
-                                                                             
+
+
             with background_compute.synchronous(), ExitStack() as stack:
-                if weld:
+                if weld and not preview:
                     for body in [build.result_of(source), *boolean_break.fragments_of(source)]:
                         stack.enter_context(effect_groups.welded(body))
                 return fn(context, source, *args, **kwargs)
@@ -120,8 +123,8 @@ def _operation(fn=None, *, weld=True):
     return run
 
 
-                                                                             
-          
+
+
 
 def _touch(self, context):
     live.touch_prop(self, context)
@@ -224,8 +227,8 @@ def _fill_base(context, source, triangulate=True, *, solid_damage=False):
     base=_object_mesh_local(source,source) if use_modifiers else source.data.copy()
     normals=np.array([n.vector[:] for n in base.corner_normals],dtype=np.float32)
     if not use_modifiers and source.modifiers:
-                                                                           
-                                                                                
+
+
         reference=_object_mesh_local(source,source)
         try:
             if len(reference.vertices)==len(base.vertices) and len(reference.loops)==len(base.loops):
@@ -248,8 +251,8 @@ def _fill_base(context, source, triangulate=True, *, solid_damage=False):
         _,prep=plan
         base=_prepared_fill_mesh(base,prep,factor)
     if not triangulate:return base
-                                                                          
-                                                                             
+
+
     bm=bmesh.new();bm.from_mesh(base)
     bmesh.ops.triangulate(bm,faces=[f for f in bm.faces if len(f.verts)>3],quad_method='FIXED',ngon_method='EAR_CLIP')
     bm.to_mesh(base);bm.free();base.update()
@@ -373,7 +376,7 @@ class ProjectDamagePhysicsSettings(bpy.types.PropertyGroup):
         description='Brick Damage: chance that a brick breaks in two')
     hide_fill: bpy.props.BoolProperty(
         name='Hide Fill', default=True, description='Hide the fill objects once they are fractured')
-                  
+
     hit_separate: bpy.props.BoolProperty(
         name='Separate Fragments', default=False, update=_touch,
         description='Concrete Hit: the cracks around the crater cut through, so the impact plates come '
@@ -401,12 +404,12 @@ class ProjectDamagePhysicsSettings(bpy.types.PropertyGroup):
         items=(('X', 'X', 'Fibres along the object X axis'), ('Y', 'Y', 'Fibres along the object Y axis'),
                ('Z', 'Z', 'Fibres along the object Z axis (vertical studs and boards)')),
         description='Wood: direction of the fibres')
-                          
+
     cut_mode: bpy.props.EnumProperty(
         name='Fracture', default='AUTO',
-        items=(('AUTO', 'Automatic + Drawing', 'Generate cells, then apply both knife layers; Guidance adds seeds first'),
-               ('DRAWN', 'Drawn Lines', 'Only the lines drawn with Grease Pencil break the fills'),
-               ('BOTH', 'Automatic + Drawing', 'Generate cells, then apply both knife layers')),
+        items=(('AUTO', 'Automatic + Cuts', 'Generate cells, then apply the knife drawings and any assigned Cut Plane. Guidance adds seeds first'),
+               ('DRAWN', 'Cuts Only', 'Split using the assigned Cut Plane and knife drawings. Guidance adds local cells if assigned'),
+               ('BOTH', 'Automatic + Cuts', 'Generate cells, then apply the knife drawings and any assigned Cut Plane')),
         description='What breaks the fill objects')
     cut_drawing: bpy.props.PointerProperty(
         name='Fracture Lines', type=bpy.types.Object, poll=lambda self, obj: obj.type in {'GREASEPENCIL', 'GPENCIL', 'CURVE'},
@@ -415,12 +418,12 @@ class ProjectDamagePhysicsSettings(bpy.types.PropertyGroup):
     cut_gap: bpy.props.FloatProperty(
         name='Line Gap (cm)', default=0.05, min=0.001, soft_max=2.0,
         description='Width of a drawn fracture line. Follows Master Scale')
-                                  
+
     detach_remove: bpy.props.BoolProperty(
         name='Remove from Wall', default=True,
         description='Bead, Corner Piles and Deposits: once detached, switch the generator off on the wall and '
                     'update it, so only the loose objects remain (Undo brings it back)')
-                    
+
     bullet_piece_size: bpy.props.FloatProperty(
         name='Piece Size (cm)', default=1.0, min=0.05, soft_max=10.0,
         description='Bullet Impacts: typical size of a piece of a crater or bullet hole. Follows Master Scale')
@@ -430,8 +433,8 @@ def settings(obj):
     return obj.project_damage_physics
 
 
-                                                                             
-         
+
+
 
 def _gscale(props):
     try:
@@ -516,10 +519,10 @@ def _remove(obj):
         bpy.data.meshes.remove(mesh)
 
 
-                                                                               
-                                                                              
-                                                                               
-                                                                           
+
+
+
+
 WORK_SCENE = '_ProjectDamage_Work'
 _WORK_SCENE_NAME = None
 
@@ -659,7 +662,7 @@ def _solid_islands(bm):
     for ids in parts:
         vertices={v for i in ids for v in bm.faces[i].verts}
         co=np.array([v.co[:] for v in vertices]);lo=co.min(0);hi=co.max(0)
-                                                                         
+
         origin=Vector(co.mean(0));volume=0.0
         for i in ids:
             points=[v.co-origin for v in bm.faces[i].verts]
@@ -720,8 +723,8 @@ def _split_pinches(bm):
             if e1 is None:
                 e1, e2 = pv, d.cross(pv)
             ang = math.atan2(pv.dot(e2), pv.dot(e1)) % (2 * math.pi)
-                                                                           
-                                                          
+
+
             ring.append((ang, f, f.normal.dot(d.cross(pv)) < 0.0))
         if not ring or len(ring) % 2:
             continue
@@ -889,9 +892,9 @@ def _outputs_inside(source):
     """The objects that sit inside the cut: laths / framing, bricks and mortar, rebar."""
     uid = _uid(source)
     stamps = ('project_damage_lath_of', 'project_damage_bricks_of', 'project_damage_rebar_of',
-              'project_damage_bfrag_of',                                                   
-              'project_damage_pipes_of',                                         
-              'project_damage_cables_of')              
+              'project_damage_bfrag_of',
+              'project_damage_pipes_of',
+              'project_damage_cables_of')
     return [o for o in bpy.data.objects if uid and o.type == 'MESH' and len(o.data.polygons)
             and any(o.get(s) == uid for s in stamps)]
 
@@ -904,13 +907,13 @@ def _auto_depth(context, source, module, s):
     if s.fill_depth == 'SURFACE':
         return _cm(context, source, s.surface_depth)
     if module == 'lath':
-                                                                         
+
         return _cm(context, source, min(p.lath_plaster_min, p.lath_plaster_max))
     return None
 
 
-                                                                             
-             
+
+
 
 def _output_boxes(source, objects):
     """Bounding boxes (source-local) of the loose parts of `objects`."""
@@ -943,8 +946,8 @@ def fill_damage(context, source, module, all_damage=False):
         return _detach(context, source, module, s)
     if p.all_off:
         return [], [({'ERROR'}, 'Fill Damage: the damage is switched off (All Off)')]
-                                                                    
-                                                                       
+
+
     result = build.result_of(source)
     if result is None or result.type != 'MESH' or not len(result.data.polygons):
         return [], [({'ERROR'}, 'Fill Damage: press Update to build the damage first')]
@@ -967,9 +970,9 @@ def fill_damage(context, source, module, all_damage=False):
     temps = []
     try:
         inside = _outputs_inside(source)
-        grow = 0.01 * _gscale(p) / unit_factor(context)               
-                                                                                    
-                                                                                 
+        grow = 0.01 * _gscale(p) / unit_factor(context)
+
+
         temps.append(_grown(context, result, grow / max(1e-9, min(result.matrix_world.to_scale()))))
         operands = [temps[-1]]
         for obj in inside:
@@ -987,8 +990,8 @@ def fill_damage(context, source, module, all_damage=False):
         if not len(base.materials):
             base.materials.append(None)
         base.materials.append(_inner_material(source))
-                                                                               
-                                                                             
+
+
         for operand in operands:
             me=operand.data
             for name in ('_pd_fill_outer','_pd_fill_outer_normal'):
@@ -1001,20 +1004,20 @@ def fill_damage(context, source, module, all_damage=False):
         for obj in temps:
             _remove(obj)
 
-                                                                                 
+
     from .params import unit_factor
     factor = unit_factor(context)
     g = _gscale(p)
     min_vol = max(1e-9, getattr(p, 'debris_min_volume', 0.05) * g ** 3) / factor ** 3
     min_thick = 0.0 if s.fill_cracks else getattr(p, 'debris_min_thickness', 0.3) * g / factor
-                                                                            
-                                                                            
-                                                                          
-                                                                           
-                                                                              
-                                                                   
+
+
+
+
+
+
     if module == 'dbevel':
-                                                                                 
+
         min_thick = 0.0
         min_vol = min(min_vol, 1e-10)
     hit_parts = module == 'hit' and min_thick > 0.0
@@ -1022,19 +1025,19 @@ def fill_damage(context, source, module, all_damage=False):
         min_thick = min(min_thick, 0.3 * max(0.0, getattr(p, 'hit_layer_thickness', 0.5)) * g / factor)
     biggest = 0.0
     if module == 'bullet':
-                                                                  
+
         min_vol *= 0.2
         min_thick *= 0.5
     bm = bmesh.new()
     bm.from_mesh(fill)
-                                                                      
-                                                                        
+
+
     if solver != 'MANIFOLD':
         _triangulate_warped_faces(bm)
         _split_pinches(bm)
     wanted = (lambda part: True) if all_damage else _effect_parts(bm, module)
-                                                                           
-                                                                               
+
+
     flush = _output_boxes(source, inside)
     tol = 0.02 * g / factor
     out = []
@@ -1042,8 +1045,8 @@ def fill_damage(context, source, module, all_damage=False):
     dropped_thin = 0
     parts = sorted(_solid_islands(bm), key=len, reverse=True)
     if hit_parts:
-                                                                         
-                                                                         
+
+
         def hit_volume(part):
             if not wanted(part):return -1.0
             piece=_bm_part(bm,part)
@@ -1052,7 +1055,7 @@ def fill_damage(context, source, module, all_damage=False):
         parts.sort(key=hit_volume,reverse=True)
     for part in parts:
         if not wanted(part):
-            continue                                                                
+            continue
         pb = _bm_part(bm, part)
         vol = abs(pb.calc_volume())
         area = sum(f.calc_area() for f in pb.faces)
@@ -1061,7 +1064,7 @@ def fill_damage(context, source, module, all_damage=False):
         same = any(np.abs(lo - a).max() < tol and np.abs(hi - b).max() < tol for a, b in flush)
         thin = 2.0 * vol / max(area, 1e-12) < min_thick
         if hit_parts and thin and vol >= 0.1 * biggest:
-            thin = False                                                                       
+            thin = False
         if same or vol < min_vol or thin or not _closed(pb):
             dropped += 1
             if thin and not same and vol >= min_vol:
@@ -1077,7 +1080,7 @@ def fill_damage(context, source, module, all_damage=False):
         obj, vol = _make_object('%s_Fill_%03d' % (source.name, len(out) + 1), mesh, coll, source)
         mesh.name = obj.name
         obj[FILL_STAMP] = _uid(source)
-        ownership.bind(source, obj)                                               
+        ownership.bind(source, obj)
         obj[FILL_KIND] = module
         out.append(obj)
     bm.free()
@@ -1160,7 +1163,7 @@ def _detach(context, source, module, s):
     bm.from_mesh(added)
     if solver == 'EXACT':
         _split_pinches(bm)
-                                                                           
+
     wanted = _effect_parts(bm, module, any_face=True) if separate is None else (lambda part: True)
     kinds_of = getattr(wanted, 'kinds', lambda part: [module])
     out, dropped = [], 0
@@ -1191,7 +1194,7 @@ def _detach(context, source, module, s):
     bpy.data.meshes.remove(added)
     if not out:
         return [], [({'WARNING'}, 'Detach: %s added nothing to this object' % LABELS[module])]
-                                                                           
+
     for obj in previous:
         _remove(obj)
     reports.append(({'INFO'}, 'Detach: %d %s objects in %s' % (len(out), LABELS[module], coll.name)))
@@ -1217,8 +1220,8 @@ def remove_from_wall(context, source, modules):
     return list(reports or [])
 
 
-                                                                             
-                        
+
+
 
 def _front_area(obj):
     """Area of the faces that carry a source material (not the inner slot)."""
@@ -1259,8 +1262,8 @@ def _enforce_piece_budget(context,pieces,budget):
     return pieces[:budget-1]+[active]
 
 
-                                                                             
-                                                
+
+
 
 class _Lattice:
     """The brick lattice of brick_damage.cpp (Lattice / Locate), in core cm."""
@@ -1366,7 +1369,7 @@ def _fit_offsets(L, t, b, bricks):
     u1 = np.array([(v @ T).max() for v in bricks])
     v0 = np.array([(v @ B).min() for v in bricks])
     v1 = np.array([(v @ B).max() for v in bricks])
-                                                                                           
+
     ph = np.concatenate([v0 - 0.5 * L.m, v1 + 0.5 * L.m]) / L.Pv * 2 * math.pi
     L.offV = (math.atan2(np.sin(ph).mean(), np.cos(ph).mean()) / (2 * math.pi)) % 1.0 * L.Pv
     k = L.course(0.5 * (v0 + v1))
@@ -1440,7 +1443,7 @@ class _BoxCutter:
                     bpy.data.meshes.remove(out)
         finally:
             mod.solver = first
-        return None                                                      
+        return None
 
     def cut_with(self, bm):
         """Intersects with a closed bmesh (the box object's local space); a new
@@ -1492,12 +1495,12 @@ def _voronoi_cells(lo, hi, points):
             q = points[j]
             r = max((Vector(v.co) - Vector(p)).length for v in bm.verts) if bm.verts else 0.0
             if np.linalg.norm(q - p) > 2.0 * r:
-                break                                                      
+                break
             mid = Vector(0.5 * (p + q))
             nrm = Vector(q - p).normalized()
             bmesh.ops.bisect_plane(bm, geom=bm.verts[:] + bm.edges[:] + bm.faces[:],
                                    plane_co=mid, plane_no=nrm, clear_outer=True, dist=1e-7)
-                                                         
+
             pts = [v.co.copy() for v in bm.verts]
             bm.free()
             bm = bmesh.new()
@@ -1540,9 +1543,9 @@ def _voronoi_fracture(context, source, mesh, count, seed, solver=None, points=No
     if solver is None and closed and _manifold_solver():
         solver = 'MANIFOLD'
     if solver == 'MANIFOLD':
-                                                                           
-                                                                         
-                                                   
+
+
+
         cutter.obj.modifiers[0].solver = 'MANIFOLD'
     out = []
     try:
@@ -1570,7 +1573,7 @@ def _impact_points(mesh, centres, count, center, seed):
         centres = [co.mean(axis=0)]
     d = np.min([np.linalg.norm(co - np.asarray(c), axis=1) for c in centres], axis=0)
     reach = max(float(d.max()), 1e-9)
-                                                                         
+
     near = 1.0 / (d / reach + 0.02) ** 2
     w = (1.0 - center) / len(co) + center * near / near.sum()
     w = w / w.sum()
@@ -1594,12 +1597,12 @@ def _brick_fracture(context, source, fill, s, coll, hint=None):
     me = fill.data
     inner = len(me.materials) - 1
     to_local = source.matrix_world.inverted() @ fill.matrix_world
-                             
+
     co = np.empty(len(me.vertices) * 3)
     me.vertices.foreach_get('co', co)
     tl = np.array(to_local)
     verts = (co.reshape(-1, 3) @ tl[:3, :3].T + tl[:3, 3]) * factor
-                                                                          
+
     nrm = np.empty(len(me.polygons) * 3)
     me.polygons.foreach_get('normal', nrm)
     nrm = nrm.reshape(-1, 3) @ np.linalg.inv(tl[:3, :3])
@@ -1611,9 +1614,9 @@ def _brick_fracture(context, source, fill, s, coll, hint=None):
     wall_area = float(area[front].sum())
     if not front.any():
         front[:] = True
-                                                                             
-                                                                         
-                                                                            
+
+
+
     fn, fa = nrm[front], area[front]
     fn = fn / np.maximum(np.linalg.norm(fn, axis=1), 1e-12)[:, None]
     best_n, best_a = None, -1.0
@@ -1623,8 +1626,8 @@ def _brick_fracture(context, source, fill, s, coll, hint=None):
             best_n, best_a = fn[i], a
     little = wall_area < 0.2 * area.sum()
     if little and hint is not None:
-                                                                          
-                                                  
+
+
         best_n = np.array(hint)
     samples = _brick_samples(source, factor)
     lo, hi = verts.min(axis=0) - L.Lp, verts.max(axis=0) + L.Lp
@@ -1650,7 +1653,7 @@ def _brick_fracture(context, source, fill, s, coll, hint=None):
     rng = random.Random(1000003 * (s.seed + 1) + len(verts))
     U, V, D = verts @ T, verts @ B, s0 - verts @ N
     pad = L.Lp
-    pieces = []                                                
+    pieces = []
 
     def corner_fn(u0, u1, v0, v1, d0, d1):
         def corner(sx, sy, sz):
@@ -1659,15 +1662,15 @@ def _brick_fracture(context, source, fill, s, coll, hint=None):
         return corner
 
     gs = _gscale(source.project_damage)
-                                                                            
-                                                 
+
+
     split = render
     m2 = 0.5 * L.m if s.brick_mortar == 'SEPARATE' else 0.0
     leaves = max(1, int(math.ceil((D.max() - split) / L.leaf - 1e-6)))
     k0, k1 = int(L.course(V.min())), int(L.course(V.max()))
     dmax = D.max() + 1.0
-                                                                           
-                                                                                 
+
+
     taken = set()
     for v in bricks:
         bu, bv = float((v @ T).mean()), float((v @ B).mean())
@@ -1676,11 +1679,11 @@ def _brick_fracture(context, source, fill, s, coll, hint=None):
             kk = int(L.course(bv))
             aa, _ = L.locate(0, np.array([kk]), np.array([bu]))
             taken.add((kk, round(float(aa[0]), 3)))
-                                                                            
-                                                                            
-                                                                           
+
+
+
     umin, umax = U.min() - 1.0, U.max() + 1.0
-    boxes = []                                                                            
+    boxes = []
     if render > 0.05:
         vlo, vhi = V.min() - 1.0, V.max() + 1.0
         boxes.append((umin, umax, vlo, vhi, -1.0, split, 'plate'))
@@ -1695,9 +1698,9 @@ def _brick_fracture(context, source, fill, s, coll, hint=None):
                 if w == 0 and (k, round(a, 3)) in taken:
                     boxes.append((a - m2, a + ln - m2, v0, v1, d0, d1, 'plate'))
                 elif m2 > 0:
-                                                                               
-                                                                              
-                                                                            
+
+
+
                     e = 0.15 * m2
                     boxes.append((a + m2 + e, a + ln - m2 - e, v0 + 2 * m2 + e, v1 - e, d0, d1, 'brick'))
                     boxes.append((a - m2 - e, a + ln - m2 - e, v0 - e, v0 + 2 * m2 + e, d0, d1, 'joint'))
@@ -1722,7 +1725,7 @@ def _brick_fracture(context, source, fill, s, coll, hint=None):
                 plates.append(cell)
                 continue
             if kind == 'brick' and s.brick_snap > 0 and rng.random() < s.brick_snap:
-                                                                          
+
                 um = 0.5 * (u0 + u1) + (rng.random() - .5) * .3 * (u1 - u0)
                 tilt = (rng.random() - .5) * 0.8 * (cv1 - cv0)
                 lean = (rng.random() - .5) * 0.6 * (cv1 - cv0)
@@ -1741,9 +1744,9 @@ def _brick_fracture(context, source, fill, s, coll, hint=None):
                 continue
             pieces.append(cell)
     finally:
-        cutter.free()                          
+        cutter.free()
     out = []
-                                                                        
+
     min_vol = max(1e-3, getattr(source.project_damage, 'debris_min_volume', 0.05)) * _gscale(source.project_damage) ** 3 / factor ** 3
     sx = max(source.matrix_world.to_scale())
 
@@ -1758,8 +1761,8 @@ def _brick_fracture(context, source, fill, s, coll, hint=None):
                 q = _bm_part(bm, part)
                 open_edges = [e for e in q.edges if len(e.link_faces) < 2]
                 if open_edges:
-                                                                          
-                                                                   
+
+
                     bmesh.ops.holes_fill(q, edges=open_edges, sides=0)
                 if q.calc_volume() < 0:
                     bmesh.ops.reverse_faces(q, faces=q.faces[:], flip_multires=True)
@@ -1782,8 +1785,8 @@ def _brick_fracture(context, source, fill, s, coll, hint=None):
             out.append(obj)
 
     emit(parts(pieces), 'brick', 'Brick')
-                                                                          
-                                                          
+
+
     size = _cm(context, source, s.piece_size)
     for i, pm in enumerate(parts(plates)):
         area = np.empty(len(pm.polygons))
@@ -1806,7 +1809,7 @@ def _brick_fracture(context, source, fill, s, coll, hint=None):
             if got:
                 bpy.data.meshes.remove(pm)
             else:
-                got = [pm]                                                
+                got = [pm]
             emit(got, 'render', 'Render')
         else:
             emit([pm], 'render', 'Render')
@@ -1830,7 +1833,7 @@ def _volume_points(mesh, count, seed):
                 out.append(p)
                 if len(out) >= count:
                     return np.array(out)
-    if len(out) < 2:                                                     
+    if len(out) < 2:
         return co[rng.choice(len(co), size=min(max(2, count), len(co)), replace=False)]
     return np.array(out)
 
@@ -1897,7 +1900,7 @@ def _core_fracture(context, source, fill, coll, material, count, seed, centres=N
     object is built through the add-on): pieces with material-shaped break
     faces that tile the fill exactly. Returns the piece objects, or None when
     the core has no Cell Fracture."""
-    from . import core_loader, fracture_uv, mesh_io
+    from . import background_compute as bg, core_loader, fracture_uv, mesh_io
     from .params import unit_factor
     core = core_loader.load()
     if core is None or not hasattr(core.Params(), 'cellf'):
@@ -1954,6 +1957,8 @@ def _core_fracture(context, source, fill, coll, material, count, seed, centres=N
     paths=_layer_paths(context,source)['GUIDANCE']
     extra={}
     if paths and source.project_damage.cellf_guidance_amount>0:
+        # Glass refines its own pattern in modifier guidance mode.
+        c.stroke_mode = 4 if material == 'GLASS' else 3
         from .params import fill_params
         original=fill_params(source.project_damage,core,source).cellf
         for field in ('guidance_radius','guidance_depth','guidance_falloff','guidance_distance'):
@@ -1965,7 +1970,9 @@ def _core_fracture(context, source, fill, coll, material, count, seed, centres=N
         extra['cellf_strokes']=[np.ascontiguousarray((path@matrix[:3,:3].T+matrix[:3,3])*factor,np.float64) for path in paths]
     if uvs is not None:extra['uvs']=uvs
     try:
-        out = core.build_worn(points, polys, params, **extra)
+        # A knife or plane edit can reuse the same uncut automatic cells.
+        request = bg.Request('Fracturing fill', core.build_worn, (points, polys, params), extra, core)
+        out = bg.evaluate(request)
     except Exception as exc:
         raise RuntimeError('Cell Fracture: %s' % exc)
     pts = np.asarray(out.get('cellf_points', ()), dtype=np.float64).reshape(-1, 3) / factor
@@ -2016,8 +2023,8 @@ def _core_fracture(context, source, fill, coll, material, count, seed, centres=N
     return objs
 
 
-                                                                             
-                                      
+
+
 
 def _front_normal(mesh, inner):
     """Wall normal of a source-local mesh: the largest group of front
@@ -2105,7 +2112,7 @@ class _LineCutter:
                     for side in (-w, w):
                         for depth in (lo, hi):
                             co.append(tuple(p + side + n * depth))
-                                                         
+
                 faces = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]
                 me = bpy.data.meshes.new('_pd_line')
                 me.from_pydata(co, [], faces)
@@ -2188,15 +2195,31 @@ def _layer_paths(context,source):
     return paths
 
 
-def _cut_by_lines(context, source, fill, objects, s, coll):
-    """Same finite, branching knives as Cell Fracture, in source coordinates."""
-    from . import cell_cuts, fracture_uv
-    paths=_layer_paths(context,source)
-    if not paths['THROUGH'] and not paths['SURFACE']:return objects
+def _local_bounds(obj, inverse):
+    transform = inverse @ obj.matrix_world
+    corners = np.asarray([tuple(transform @ Vector(corner)) for corner in obj.bound_box])
+    return corners.min(axis=0), corners.max(axis=0)
+
+
+def _cut_pieces(context, source, fill, objects, coll, paths, plane):
+    """Use the Cell Fracture cutters and preserve the existing face data."""
+    from . import cell_cut_plane, cell_cuts, fracture_uv
+    lines = bool(paths['THROUGH'] or paths['SURFACE'])
+    inverse = source.matrix_world.inverted_safe()
+    skipped = []
+    if plane is not None and not lines:
+        low, high = plane[0].min(axis=0), plane[0].max(axis=0)
+        candidates = []
+        for obj in objects:
+            minimum, maximum = _local_bounds(obj, inverse)
+            (candidates if np.all(maximum >= low) and np.all(minimum <= high) else skipped).append(obj)
+        objects = candidates
+    if not objects:
+        return skipped, 0, 0
     points=[];polys=[];ids=[];base=[];uv=[];norm=[];mats=[];face_mats=[];face_inner=[];offset=0
     original_uv = []
     for owner,obj in enumerate(objects):
-        me=obj.data.copy();me.transform(source.matrix_world.inverted()@obj.matrix_world);me.calc_loop_triangles()
+        me=obj.data.copy();me.transform(inverse@obj.matrix_world);me.calc_loop_triangles()
         points.extend([v.co[:] for v in me.vertices])
         original_uv.append(fracture_uv.capture(me))
         inner_attr=me.attributes.get('project_damage_physics_inner')
@@ -2216,8 +2239,13 @@ def _cut_by_lines(context, source, fill, objects, s, coll):
         offset+=len(me.vertices);bpy.data.meshes.remove(me)
     out=dict(cellf_points=np.array(points,np.float64),cellf_polys=np.array(polys,np.int32),cellf_piece=np.array(ids,np.int32),
              cellf_base_poly=np.array(base,np.int32),cellf_uvs=np.array(uv,np.float64),cellf_normals=np.array(norm,np.float64))
-    result=cell_cuts.apply(context,source,out,1.,paths_by_role=paths)
-    if not source.get('project_damage_cell_cut_count'):return objects
+    result = cell_cuts.apply(context, source, out, 1., paths_by_role=paths) if lines else out
+    drawn_cuts = source.get('project_damage_cell_cut_count', 0) if lines else 0
+    plane_cuts = invalid = 0
+    if plane is not None:
+        result, plane_cuts, invalid = cell_cut_plane.cut_mesh(result, *plane, source.project_damage.cellf_inner_uv_scale)
+    if not (drawn_cuts or plane_cuts):
+        return objects + skipped, plane_cuts, invalid
     result['cellf_uvs']=np.asarray(result['cellf_uvs']).reshape(-1,4,2)
     created=[]
     try:
@@ -2226,7 +2254,7 @@ def _cut_by_lines(context, source, fill, objects, s, coll):
         for owner in np.unique(result['cellf_piece']):
             rows=np.flatnonzero(result['cellf_piece']==owner);faces=result['cellf_polys'][rows];used,remap=np.unique(faces,return_inverse=True)
             local=remap.reshape(-1,4);is_tri=local[:,2]==local[:,3]
-            me=bpy.data.meshes.new('Drawn_Fragment');me.from_pydata(result['cellf_points'][used],[],[tuple(f[:3] if tri else f) for f,tri in zip(local,is_tri)])
+            me=bpy.data.meshes.new('Cut_Fragment');me.from_pydata(result['cellf_points'][used],[],[tuple(f[:3] if tri else f) for f,tri in zip(local,is_tri)])
             for mat in mats:me.materials.append(mat)
             src=result['cellf_base_poly'][rows];mask=src<0
             me.polygons.foreach_set('material_index',np.array([mats.index(inner) if i<0 else face_mats[i] for i in src],np.int32))
@@ -2234,12 +2262,12 @@ def _cut_by_lines(context, source, fill, objects, s, coll):
             at=me.attributes.new('project_damage_physics_inner','BOOLEAN','FACE');at.data.foreach_set('value',mask)
             me.update()
             fracture_uv.transfer(me, src, original_uv)
-            obj,_=_make_object(fill.name+'_Drawn',me,coll,source)
+            obj,_=_make_object(fill.name+'_Cut',me,coll,source)
+            created.append(obj)
             loops = np.concatenate([result['cellf_uvs'][r,:3 if tri else 4] for r,tri in zip(rows,is_tri)])
             fracture_uv.project(obj, mask, native=loops)
-            created.append(obj)
         for obj in objects:_remove(obj)
-        return created
+        return created + skipped, plane_cuts, invalid
     except Exception:
         for obj in created:_remove(obj)
         raise
@@ -2254,26 +2282,45 @@ def _whole_fill(context, source, fill, coll):
     return obj
 
 
-                                                                             
-                                  
+
+
 
 def _bullet_material(source):
     """Fracture Type Auto for Bullet Impacts: by the bullet material."""
     m = str(getattr(source.project_damage, 'bullet_material', '2'))
-    return {'0': 'ROCK', '1': 'WOOD'}.get(m, 'CONCRETE')                                    
+    return {'0': 'ROCK', '1': 'WOOD'}.get(m, 'CONCRETE')
 
 
 @_operation
-def fracture(context, source, module, fills=None, proximity=None, shards=None, center=None):
+def fracture(context, source, module, fills=None, proximity=None, shards=None, center=None, *, live_preview=False):
     """Breaks the fill objects into pieces. Returns (pieces, reports)."""
     s = settings(source)
     fills = [o for o in (fills if fills is not None else fills_of(source, module)) if o.type == 'MESH']
     if not fills:
         return [], [({'ERROR'}, 'Fracture: press Fill Damage first')]
+    from . import cell_cut_plane, fracture_uv
+    p = source.project_damage
+    plane = None
+    if p.cellf_cut_plane is not None:
+        if p.cellf_cut_plane in fills:
+            return [], [({'ERROR'}, 'Cut Plane must be a separate mesh from the pieces being cut')]
+        inverse = source.matrix_world.inverted_safe()
+        bounds = [_local_bounds(fill, inverse) for fill in fills]
+        diagonal = max(float(np.linalg.norm(hi - lo)) for lo, hi in bounds)
+        try:
+            plane = cell_cut_plane.mesh_arrays(context, source, skin=max(diagonal * 2e-6, 1e-7))
+        except (ValueError, RuntimeError) as exc:
+            return [], [({'ERROR'}, f'Cut Plane: {exc}')]
+        if plane is None:
+            return [], [({'ERROR'}, 'Cut Plane has no faces. Extrude edges into faces.')]
+    paths = _layer_paths(context, source)
+    lines = bool(paths['THROUGH'] or paths['SURFACE'])
+    guidance = bool(paths['GUIDANCE']) and p.cellf_guidance_amount > 0
+    if not live_preview and s.cut_mode == 'DRAWN' and not (lines or guidance or plane is not None):
+        return [], [({'ERROR'}, 'Fracture: add a Cut Plane or draw fractures first')]
     coll = _collection(context, source, PIECE_COLLECTION, '_FillPieces')
-    from . import fracture_uv
     out, reports = [], []
-    fills.sort(key=lambda o: -_front_area(o))
+    fills.sort(key=lambda o: (-_front_area(o), o.name))
     requested=[]
     for fill in fills:
         kind=fill.get(FILL_KIND,module)
@@ -2281,15 +2328,12 @@ def fracture(context, source, module, fills=None, proximity=None, shards=None, c
                          _piece_count(context,source,fill,s.bullet_piece_size if kind=='bullet' else s.piece_size))
     allocations=_allocate_budget(requested,s.amount_budget)
     hint = None
-    paths=_layer_paths(context,source)
-    lines = bool(paths['THROUGH'] or paths['SURFACE'])
-    guidance = bool(paths['GUIDANCE']) and source.project_damage.cellf_guidance_amount>0
-    if s.cut_mode == 'DRAWN' and not (lines or guidance):
-        return [], [({'ERROR'}, 'Fracture: Drawn Lines needs a Fracture Lines drawing with strokes')]
+    plane_cuts = invalid_cuts = 0
     uid = _uid(source)
     for i, fill in enumerate(fills):
         kind = fill.get(FILL_KIND, module)
         previous_pieces=[o for o in bpy.data.objects if o.get(PIECE_STAMP)==uid and o.get('project_damage_piece_fill')==fill.name]
+        pieces = None
         try:
             material = s.material
             if material == 'AUTO':
@@ -2306,7 +2350,6 @@ def fracture(context, source, module, fills=None, proximity=None, shards=None, c
                 ctr, prox = 0.0, proximity
             count=min(max(1,int(count)),allocations[i])
             centres = [o.matrix_world.translation.copy() for o in prox.all_objects] if prox is not None else []
-            pieces = None
             if (count<=1 or s.cut_mode == 'DRAWN') and not guidance:
                 pieces = [_whole_fill(context, source, fill, coll)]
             elif material == 'BRICK' and not guidance:
@@ -2321,9 +2364,13 @@ def fracture(context, source, module, fills=None, proximity=None, shards=None, c
             if pieces is None:
                 pieces = _hit_fracture(context, source, fill, coll, count, ctr, s.seed + i, prox,
                                        even=kind != 'hit', label='Piece', kind=kind)
-            if lines:
-                pieces = _cut_by_lines(context, source, fill, pieces, s, coll)
-        except RuntimeError as exc:
+            if lines or plane is not None:
+                pieces, cuts, invalid = _cut_pieces(context, source, fill, pieces, coll, paths, plane)
+                plane_cuts += cuts
+                invalid_cuts += invalid
+        except (RuntimeError, ValueError) as exc:
+            for obj in pieces or ():
+                _remove(obj)
             reports.append(({'WARNING'}, '%s: %s' % (fill.name, exc)))
             continue
         if not pieces:
@@ -2345,7 +2392,7 @@ def fracture(context, source, module, fills=None, proximity=None, shards=None, c
             if not _mesh_closed(obj.data):
                 _close_holes(obj.data)
             com = _mass(obj.data)[1]
-            if com.length > 1e-9:                                                       
+            if com.length > 1e-9:
                 obj.data.transform(Matrix.Translation(-com))
                 obj.matrix_world = obj.matrix_world @ Matrix.Translation(com)
             ownership.bind(source, obj)
@@ -2368,12 +2415,16 @@ def fracture(context, source, module, fills=None, proximity=None, shards=None, c
         uv_name = fracture_uv.layer_name(obj.data) or fracture_uv.project(obj, mask, uv_scale)
         if uv_name:
             material_uv.configure_zones(obj, mask, uv_name)
+    if plane is not None:
+        reports.append(({'INFO'}, f'Cut Plane split {plane_cuts} pieces'))
+    if invalid_cuts:
+        reports.append(({'WARNING'}, f'Cut Plane kept {invalid_cuts} invalid pieces unchanged'))
     reports.append(({'INFO'}, 'Fracture: %d pieces from %d objects in %s (Amount Budget %d)' % (len(out), len(fills), coll.name,s.amount_budget)))
     return out, reports
 
 
-                                                                             
-                                                
+
+
 
 @_operation
 def fill_hole(context, source):
@@ -2416,17 +2467,17 @@ def separate_pieces(context, source):
         obj[SPLIT_STAMP] = uid
         obj.project_damage_og_object = source
         if not out:
-            obj['project_damage_split_wall'] = True                                                   
-                                                                             
+            obj['project_damage_split_wall'] = True
+
         out.append(obj)
     bm.free()
-                                                                 
+
     result.hide_set(True)
     result.hide_render = True
     return out, [({'INFO'}, 'Separate to Pieces: %d objects in %s' % (len(out), coll.name))]
 
 
-FRAGMENT_STAMP = 'project_damage_fragment_of'                                                      
+FRAGMENT_STAMP = 'project_damage_fragment_of'
 
 
 def replaced_by_pieces(source, result):
@@ -2445,8 +2496,8 @@ def after_fragments(result, pieces):
         pieces[0]['project_damage_split_wall'] = True
 
 
-                                                                             
-           
+
+
 
 def _quietly(execute):
     """Runs an operator with the add-on's live handlers paused: the temporary
@@ -2465,6 +2516,19 @@ def _quietly(execute):
     return run
 
 
+def _live_physics_objects(objects):
+    results = []
+    for obj in objects or ():
+        if obj is None:
+            continue
+        try:
+            if bpy.data.objects.get(obj.name) == obj:
+                results.append(obj)
+        except ReferenceError:
+            continue
+    return results
+
+
 class _SourceOp:
     bl_options = {'REGISTER', 'UNDO'}
     module: bpy.props.EnumProperty(items=tuple((m, LABELS[m], '') for m in MODULES), options={'HIDDEN'})
@@ -2477,7 +2541,7 @@ class _SourceOp:
                 and src is not None and src.type == 'MESH')
 
     def invoke(self, context, event):
-                                                                             
+
         if context.mode != 'OBJECT' and context.object is not None:
             bpy.ops.object.mode_set(mode='OBJECT')
         return self.execute(context)
@@ -2485,19 +2549,26 @@ class _SourceOp:
     def _finish(self, context, source, objects, reports):
         for kind, msg in reports:
             self.report(kind, msg)
-        if objects:
-            for obj in context.view_layer.objects.selected:
-                obj.select_set(False)
-            for obj in objects:
-                if obj.name in context.view_layer.objects:
-                    obj.select_set(True)
-            if objects[0].name in context.view_layer.objects:
-                context.view_layer.objects.active = objects[0]
-            from . import cellf_output
-            if source.get(cellf_output.SWAP_ALL):
-                cellf_output.sync_switch(context, source)
-            return {'FINISHED'}
-        return {'CANCELLED'}
+        results = _live_physics_objects(objects)
+        if not results:
+            return {'CANCELLED'}
+
+        view_layer = context.view_layer
+        view_layer.update()
+        selectable = set(context.selectable_objects or ())
+        visible_results = [obj for obj in results if obj in selectable]
+        if visible_results:
+            # Changing selection invalidates Blender's live selected-objects iterator.
+            for obj in tuple(context.selected_objects or ()):
+                if obj is not None:
+                    obj.select_set(False, view_layer=view_layer)
+            for obj in visible_results:
+                obj.select_set(True, view_layer=view_layer)
+            view_layer.objects.active = visible_results[0]
+        from . import cellf_output
+        if source.get(cellf_output.SWAP_ALL):
+            cellf_output.sync_switch(context, source)
+        return {'FINISHED'}
 
 
 # действие «Fill Damage»
@@ -2525,6 +2596,7 @@ class PROJECT_DAMAGE_OT_physics_fill(_SourceOp, bpy.types.Operator):
             self.report({'INFO'},'Calculation queued in background')
             return {'FINISHED'}
         objects, reports = fill_damage(context, source, self.module)
+        objects = _live_physics_objects(objects)
         if objects and self.module in ADDITIVE and settings(source).detach_remove:
             kinds = {k for o in objects for k in o.get('project_damage_fill_kinds', [self.module])}
             reports += remove_from_wall(context, source, sorted(kinds))
@@ -2621,21 +2693,41 @@ class PROJECT_DAMAGE_OT_physics_fracture(_SourceOp, bpy.types.Operator):
     bl_idname = 'project_damage.physics_fracture'
     bl_label = 'Fracture'
     fragments_only: bpy.props.BoolProperty(default=False,options={'HIDDEN'})
+    notify_live_disabled: bpy.props.BoolProperty(default=True, options={'HIDDEN', 'SKIP_SAVE'})
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode != 'EDIT_MESH':
+            return super().poll(context)
+        source = ownership.context_source(context)
+        return (source is not None and context.object == source.project_damage.cellf_cut_plane
+                and not live._APPLYING and not live._HISTORY_RESTORING)
 
     @_quietly
     def execute(self, context):
         source = ownership.context_source(context)
-        from . import python_jobs
-        if python_jobs.queue(context,source,'FRACTURE',self.module,fragments_only=getattr(self,'fragments_only',False)):
-            self.report({'INFO'},'Calculation queued in background')
-            return {'FINISHED'}
+        if context.mode == 'EDIT_MESH':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        from . import physics_live, python_jobs
         try:
             chosen=fracture_targets(context,source,self.module,self.fragments_only)
+            physics_live.manual(context, source, self.module, chosen)
+            from .boolean_break import FRAGMENT_STAMP
+            uid = _uid(source)
+            fragments = self.module == 'boolean' and bool(chosen and chosen[0].get(FRAGMENT_STAMP) == uid)
+            scope = (tuple(obj.name for obj in chosen) if chosen else (), fragments, self.notify_live_disabled)
+            if python_jobs.queue(context,source,'FRACTURE',self.module,fragments_only=self.fragments_only,
+                                 fracture_scope=scope):
+                self.report({'INFO'},'Calculation queued in background')
+                return {'FINISHED'}
             objects, reports = fracture(context, source, self.module, fills=chosen)
         except RuntimeError as exc:
             self.report({'ERROR'}, str(exc))
             return {'CANCELLED'}
-        return self._finish(context, source, objects, reports)
+        status = self._finish(context, source, objects, reports)
+        if status == {'FINISHED'}:
+            physics_live.fracture_finished(context, source, self.module, scope[0], scope[1], notify=scope[2])
+        return status
 
 
 # действие «Fill Hole»
@@ -2694,7 +2786,7 @@ class PROJECT_DAMAGE_OT_physics_lines_new(_SourceOp, bpy.types.Operator):
         name = source.name + '_FractureLines'
         gp = bpy.data.grease_pencils.new(name)
         layer = gp.layers.new('Fracture Lines', set_active=True)
-        layer.frames.new(context.scene.frame_current)
+        layer.frames.new(guide_timing.FRAME)
         obj = bpy.data.objects.new(name, gp)
         output_collections.link_object(context,source,obj)
         obj.parent = source
@@ -2727,8 +2819,8 @@ class PROJECT_DAMAGE_OT_physics_lines_done(_SourceOp, bpy.types.Operator):
         return {'FINISHED'}
 
 
-                                                                             
-                                                                           
+
+
 
 # здесь хранятся значения, которые сохраняются вместе с объектом
 class ProjectDamageQuickPhysics(bpy.types.PropertyGroup):
@@ -2742,7 +2834,15 @@ class ProjectDamageQuickPhysics(bpy.types.PropertyGroup):
     start_frame: bpy.props.IntProperty(
         name='Start Frame', default=1,min=0,max=300000,
         description='Frame where the simulation starts; before it every piece stays in place')
-    end_frame: bpy.props.IntProperty(name='End Frame', default=250,min=1,max=300000,description='Last simulated and baked frame. Minimum 1; maximum 300000. Longer ranges take more time and store more animation keys')
+    end_frame: bpy.props.IntProperty(name='End Frame', default=250,min=1,max=300000,description='Last frame of the live simulation')
+    bake_start_frame: bpy.props.IntProperty(name='Bake Start', min=0, max=300000,
+        get=lambda self: self.get('bake_start_frame', self.id_data.frame_start),
+        set=lambda self, value: self.__setitem__('bake_start_frame', value),
+        description='First frame to write keyframes. Defaults to the scene start. Simulation runs from its start before recording begins')
+    bake_end_frame: bpy.props.IntProperty(name='Bake End', min=0, max=300000,
+        get=lambda self: self.get('bake_end_frame', self.id_data.frame_end),
+        set=lambda self, value: self.__setitem__('bake_end_frame', value),
+        description='Last frame to write keyframes, inclusive. Defaults to the scene end. Extends the scene and simulation cache as needed')
     hold: bpy.props.EnumProperty(
         name='Hold', default='NONE',
         items=(('HIT', 'Only Hit Pieces', 'Hold the shards until the collider or Hit Area reaches them. Enable Chain Reaction to pass the impact between shards'),
@@ -2799,7 +2899,7 @@ def _quick_targets(context):
     sel = [o for o in context.selected_objects if o.type == 'MESH' and (
            o.get(PIECE_STAMP) or o.get(SPLIT_STAMP) or o.get('project_damage_cellf_of') or o.get('project_damage_rbf_of') or o.get('project_damage_bfrag_of')
            or o.get(FRAGMENT_STAMP) or not (_is_source(o) or _is_owned_output(o) or o.get(FILL_STAMP)))]
-                                                                         
+
     sel = list(dict.fromkeys(o.parent if o.get('project_damage_rough_detail') and o.parent else o
                              for o in sel))
     if sel:
@@ -2916,7 +3016,7 @@ def _animated(obj):
     return False
 
 
-HOLD_STAMP = 'project_damage_hold_hit'                                                
+HOLD_STAMP = 'project_damage_hold_hit'
 
 
 def _clear_hold(obj):
@@ -3330,9 +3430,9 @@ def draw_fragment_fracture(layout,source):
         for value in options:row.prop_enum(s,'material',value)
     if s.material=='WOOD':box.prop(s,'grain',expand=True)
     col=box.column(align=True);col.prop(s,'piece_size');col.prop(s,'amount_budget');col.prop(s,'seed')
-    op=box.operator('project_damage.physics_fracture',text='Fracture Selected Fragments',icon='MOD_EXPLODE')
-    op.module='boolean';op.fragments_only=True
     from . import inner_rough
     from . import cell_cuts
-    cell_cuts.draw_layers(box,bpy.context,source)
+    cell_cuts.draw_layers(box,bpy.context,source,physics=True)
+    op=box.operator('project_damage.physics_fracture',text='Fracture Selected Fragments',icon='MOD_EXPLODE')
+    op.module='boolean';op.fragments_only=True
     inner_rough.draw(box,source,'pieces')

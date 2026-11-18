@@ -14,9 +14,10 @@ STAMPS += ('project_damage_cellf_of',)
 STAMPS += ('project_damage_wallhole_of',)
 STAMPS += ('project_damage_weld_of','project_damage_grass_of','project_damage_gravel_of')
 STAMPS += ('project_damage_foam_of','project_damage_concrete_rebar_of','project_damage_paper_generator_of')
+STAMPS += ('project_damage_drawn_rebar_of',)
 
-                                                                           
-                                                                       
+
+
 LOOSE_STAMPS = ('project_damage_fill_of', 'project_damage_fill_piece_of',
                 'project_damage_split_piece_of', 'project_damage_fragment_of')
 
@@ -29,7 +30,7 @@ def is_internal_key(name):
 def source_of(obj):
     if obj is None:
         return None
-                                                                             
+
     original = getattr(obj, 'project_damage_og_object', None)
     if original is not None and original is not obj:
         return original if original.type == 'MESH' else None
@@ -42,8 +43,8 @@ def source_of(obj):
     drawing_owner = obj.get('project_damage_paint_source')
     if isinstance(drawing_owner, bpy.types.Object):
         return drawing_owner
-                                                                              
-                                                                                        
+
+
     fragment = obj.get('project_damage_fragment_of')
     if isinstance(fragment, str) and hasattr(bpy.data, 'objects'):
         result = bpy.data.objects.get(fragment)
@@ -63,7 +64,7 @@ def source_of(obj):
 def pinned_source(context):
     obj=getattr(context.window_manager,'project_damage_pinned_source',None)
     try:
-        obj=source_of(obj)                                                                
+        obj=source_of(obj)
         if obj is not None and obj.type=='MESH' and obj.name in context.scene.objects:
             return obj
     except ReferenceError:
@@ -111,7 +112,7 @@ def release_loose_piece(context,obj):
     obj.project_damage_og_object=None
     for key in LOOSE_STAMPS:
         if key in obj:del obj[key]
-                                                                              
+
     for key in ('project_damage_fill_kind','project_damage_fill_kinds','project_damage_piece_fill',
                 'project_damage_split_wall'):
         if key in obj:del obj[key]
@@ -208,7 +209,7 @@ def _copy_group(raw, target):
 
 @persistent
 def migrate_scene(_unused=None):
-                                                                                   
+
     old_prefix = 'edgy'
     for obj in bpy.data.objects:
         if obj.library is not None and obj.override_library is None:
@@ -284,7 +285,7 @@ class PROJECT_DAMAGE_OT_select_result(bpy.types.Operator):
         from .build import result_of
         result = result_of(source)
         if result is None: return {'CANCELLED'}
-                                                                       
+
         context.view_layer.objects.active = source
         focus_result(context, source, result)
         return {'FINISHED'}
@@ -361,8 +362,8 @@ def register():
     for cls in (PROJECT_DAMAGE_OT_pin_settings, PROJECT_DAMAGE_OT_select_original, PROJECT_DAMAGE_OT_select_result, PROJECT_DAMAGE_OT_delete_result):
         bpy.utils.register_class(cls)
     bpy.app.handlers.load_post.append(migrate_scene)
-                                                                      
-                                                                           
+
+
     if hasattr(bpy.data, 'objects'):
         migrate_scene()
     else:

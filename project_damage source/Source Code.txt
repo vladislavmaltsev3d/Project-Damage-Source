@@ -1,7 +1,1 @@
-Project Damage | Procedural Destruction Toolkit
-
-Source Code:
 https://github.com/vladislavmaltsev3d/Project-Damage-Source
-
-Python add-on and C++ generator source code, build instructions, licenses and credits.
-License: GNU GPL v3 or later; third-party components retain their own licenses.

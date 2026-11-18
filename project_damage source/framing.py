@@ -19,7 +19,7 @@ FIELDS = (
     ('noggin_spacing', 'double', 60.0, True), ('double_plate', 'bool', True, False),
     ('skin', 'double', 1.25, True), ('cavity_reach', 'double', 45.0, True),
     ('paper_tear', 'double', 4.0, True), ('paper_depth', 'double', 0.25, True),
-    ('nails', 'double', 0.6, False), ('nail_length', 'double', 1.0, False),
+    ('nails', 'double', 0.6, False), ('nail_length', 'double', 1.0, True),
     ('wood_broken', 'double', 0.2, False), ('facet_angle', 'double', 20.0, False),
 )
 
@@ -67,7 +67,7 @@ HINTS = {
     'rebar_paper_tear': 'Width of the face paper torn off around each hole (exposed gypsum). 0 = clean edge',
     'rebar_paper_depth': 'Thickness of the paper layer that tears off around the holes',
     'rebar_nails': 'Chance that a nail stays standing in the frame where the board came off',
-    'rebar_nail_length': 'How far the nails stick out of the frame, times the skin thickness',
+    'rebar_nail_length': 'Controls the exposed length of each nail from its timber fixing point',
     'rebar_wood_broken': 'Chance that a member crossing a hole is snapped, with splintered ends. '
                          'Pieces nothing holds are dropped',
     'rebar_facet_angle': 'Curved shapes are framed as flat panels; faces within this angle of each other share one panel',
@@ -95,9 +95,9 @@ def nail_material():
     return mat
 
 
-def finish_mesh(mesh, source, part, grain):
+def finish_mesh(mesh, source, part, grain, *, props=None):
     """Wood / nail slots and the grain attribute on the framing output mesh."""
-    p = source.project_damage
+    p = source.project_damage if props is None else props
     wood = getattr(p, 'rebar_framing_material', None) or wood_material()
     nail = getattr(p, 'rebar_nail_material', None) or nail_material()
     mesh.materials.clear()

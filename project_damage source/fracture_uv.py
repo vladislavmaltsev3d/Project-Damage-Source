@@ -114,6 +114,8 @@ def project(obj, mask, scale=2.0, *, native=None):
     layer = mesh.uv_layers.get(old_name) if old_name else None
     if layer is None:
         layer = mesh.uv_layers.new(name=NAME, do_init=False)
+        if layer is None:
+            raise RuntimeError('Could not create an Inside Faces UV map on ' + obj.name)
         mesh[OWNER] = layer.name
     totals = np.empty(len(mesh.polygons), np.int32)
     mesh.polygons.foreach_get('loop_total', totals)
@@ -133,5 +135,37 @@ def project(obj, mask, scale=2.0, *, native=None):
     else:
         uv[loop_mask] = native[loop_mask]
     layer.uv.foreach_set('vector', uv.ravel())
+    _fill_empty_inside(mesh, layer.name, mask, totals, loop_mask, uv)
     copy_flags(mesh, active, render)
     return layer.name
+
+
+def _fill_empty_inside(mesh, inside_name, mask, totals, loop_mask, inside_uv):
+    """Inside faces had no coordinates at all in the authored maps (every
+    corner at 0,0), so any material reading the default UV map, an exporter or
+    a baker saw a single texel there. Give those faces the inside projection
+    in the authored maps too. Faces that already have UV area are not touched."""
+    faces = len(totals)
+    if not faces:
+        return
+    start = np.zeros(faces, np.int64)
+    np.cumsum(totals[:-1], out=start[1:])
+    loop_face = np.repeat(np.arange(faces), totals)
+    nxt = np.arange(len(loop_face)) + 1
+    nxt[start + totals - 1] = start
+    def area(coords):
+        return np.abs(np.bincount(loop_face, coords[:, 0] * coords[nxt, 1] - coords[nxt, 0] * coords[:, 1], faces))
+    usable = mask & (area(inside_uv.astype(np.float64)) > 1e-14)
+    if not usable.any():
+        return
+    for other in mesh.uv_layers:
+        if other.name == inside_name:
+            continue
+        coords = np.empty((len(mesh.loops), 2), np.float32)
+        other.uv.foreach_get('vector', coords.ravel())
+        empty = usable & (area(coords.astype(np.float64)) <= 1e-14)
+        if not empty.any():
+            continue
+        rows = empty[loop_face]
+        coords[rows] = inside_uv[rows]
+        other.uv.foreach_set('vector', coords.ravel())

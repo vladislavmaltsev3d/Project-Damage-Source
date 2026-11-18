@@ -213,7 +213,7 @@ class PROJECT_DAMAGE_OT_separate_fragments(bpy.types.Operator):
                 coll = _fragment_collection(context, src, settings)
             work = src.copy()
             work.data = src.data.copy()
-            if self.glass:
+            if self.glass or src.get(build.RESULT_STAMP):
                 from . import effect_groups
                 effect_groups.weld(work.data)
                 effect_groups.clear_split(work.data)
@@ -237,8 +237,9 @@ class PROJECT_DAMAGE_OT_separate_fragments(bpy.types.Operator):
             coll.objects.link(work)
             work.hide_set(False)
 
-            for obj in context.view_layer.objects.selected:
-                obj.select_set(False)
+            for obj in tuple(context.selected_objects or ()):
+                if obj is not None:
+                    obj.select_set(False)
             work.select_set(True)
             context.view_layer.objects.active = work
             bpy.ops.object.mode_set(mode='EDIT')
@@ -247,7 +248,7 @@ class PROJECT_DAMAGE_OT_separate_fragments(bpy.types.Operator):
             bpy.ops.mesh.separate(type='LOOSE')
             bpy.ops.object.mode_set(mode='OBJECT')
 
-            pieces = [o for o in context.view_layer.objects.selected if o.type == 'MESH']
+            pieces = [o for o in context.selected_objects if o is not None and o.type == 'MESH']
             if self.glass and len(pieces) < 2:
                 raise RuntimeError("No loose glass pieces were generated")
             if self.origin_mode == 'MASS':

@@ -64,6 +64,23 @@ def input_state(source):
     return (d.session_uid,live_input_state.signature(d,matrix=structure_surface.input_matrix(source,d))) if d and p.brick_loose_enabled else None
 
 
+def edge_chart(a, b, p, unit):
+    from .structure_surface import edge_normal
+    from .structure_surface_map import Chart
+    delta = b - a
+    tangent = delta.normalized()
+    width = max(1e-5, (p.brick_brick_height + p.brick_mortar) * p.brick_brick_scale * unit / 100)
+    half = width / 2
+    side = edge_normal(tangent).cross(tangent) * half
+    mesh = bpy.data.meshes.new('_PD_Brick_Edge')
+    try:
+        mesh.from_pydata([a-side, b-side, b+side, a+side], [], [(0, 1, 2, 3)])
+        mesh.update()
+        return Chart(mesh, [0], dict(enumerate(((0, 0), (delta.length, 0), (delta.length, width), (0, width)))))
+    finally:
+        bpy.data.meshes.remove(mesh)
+
+
 def generate(p,chart,damage,unit,loose):
     from . import core_loader
     core=core_loader.load()
@@ -112,7 +129,10 @@ def draw(layout,context,source):
     p=source.pd_structure
     box=layout.box();material_controls.centered_heading(box,'Bricks Settings',icon='MOD_BUILD')
     material_library.draw_property(box,p,'material',text='Bricks')
-    quality_ui.draw(box,p,'resolution');box.prop(p,'brick_bond',text='Bond');box.prop(p,'brick_brick_scale',text='Brick Scale')
+    quality_ui.draw(box,p,'resolution')
+    box.prop(p,'master_scale')
+    box.prop(p,'single_edge_members')
+    box.prop(p,'brick_bond',text='Bond');box.prop(p,'brick_brick_scale',text='Brick Scale')
     for name,title in [('brick_brick_length','Brick Length (cm)'),('brick_brick_height','Brick Height (cm)'),('brick_brick_width','Brick Width (cm)'),('brick_bond_offset','Bond Offset'),('brick_boundary_offset','Boundary Offset (cm)')]:box.prop(p,name,text=title)
     box.prop(p,'seed')
     box=layout.box();material_controls.centered_heading(box,'Mortar',icon='MATERIAL')

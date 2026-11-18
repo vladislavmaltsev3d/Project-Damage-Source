@@ -16,8 +16,10 @@ IDS = {'fracture': 4, 'fracture_concrete': 100, 'fracture_glass': 101,
 
 
 def fields(p):
-    return [r for r in p.bl_rna.properties if r.identifier.startswith(('fract_', 'fracture_'))
-            and r.identifier not in {'fract_enable', 'fract_through_enable'}]
+    # Fixed per registered class: cached instead of walking every RNA property.
+    from . import rna_fields
+    return rna_fields.select(p, 'fracture_stack', lambda r: r.identifier.startswith(('fract_', 'fracture_'))
+                             and r.identifier not in {'fract_enable', 'fract_through_enable'})
 
 
 def capture(p):
@@ -89,6 +91,15 @@ def restore(p, values, key):
         p.fract_mode = 'PROCEDURAL'; p.fract_prox_mode = PROXIMITY_ASSETS[key]
         p.fract_l1_amount = p.fract_l2_amount = p.fract_l3_amount = 0
         p.fract_prox_strength = 100.
+    elif not values:
+        # A freshly added Fracture shows cracks at once instead of all-zero
+        # levels. Set here, not as RNA defaults, so files saved earlier and
+        # presets (which unset every library value) keep their old amounts.
+        for name, value in STARTER_AMOUNTS.items():
+            setattr(p, name, value)
+
+
+STARTER_AMOUNTS = {'fract_l1_amount': 2, 'fract_l2_amount': 2, 'fract_l3_amount': 1}
 
 
 def flags(source):

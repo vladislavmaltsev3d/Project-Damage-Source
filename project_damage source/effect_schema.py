@@ -2540,9 +2540,9 @@ FRAMING_META = (
     ('frame_plates', 'bool', True, 'Bottom and top plates where the damage reaches the lowest / highest point of the object'),
     ('double_plate', 'bool', True, 'Doubled top plate, as in platform framing'),
     ('nail_amount', 'double', 0.6, 'Chance a nail stays standing at each fixing point on the stud faces where the skin came off'),
-    ('nail_length', 'double', 1.0, 'How far the nails stick out of the frame, as a multiple of the skin thickness'),
+    ('nail_length', 'double', 1.0, 'Controls the exposed length of each nail from its timber fixing point'),
 )
-FRAMING_LENGTHS = {'noggin_spacing'}
+FRAMING_LENGTHS = {'noggin_spacing', 'nail_length'}
 EFFECT_META['lath'] += FRAMING_META
 EFFECT_FIELDS['lath'] += tuple((row[0], row[0] in FRAMING_LENGTHS) for row in FRAMING_META)
 

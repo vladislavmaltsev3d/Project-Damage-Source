@@ -677,74 +677,9 @@ def fill_params(props, core, obj=None, geometry=None):
     if all_off or not props.break_rim_enable:
         p.break_rim_amount = 0
         p.break_surf_dmg = False
-    from .rebar import FIELDS
-    p.break_rebar.enable = bool(props.rebar_enable and props.ui_boolean_enable and not all_off)
-    if hasattr(p.break_rebar,'experimental_riven'):
-        p.break_rebar.experimental_riven=False
-    if hasattr(p.break_rebar, 'existing_damage'):
-        p.break_rebar.existing_damage = bool(props.rebar_existing_damage)
-    for name,kind,default,is_length in FIELDS:
-        if name=='enable':continue
-        if name.startswith('chip_') and not hasattr(p.break_rebar,name):continue
-        value=getattr(props,'rebar_'+('fill' if name=='material' else name))
-        if isinstance(value,str):value=int(value)
-        if is_length:value*=gscale
-        if name=='detail' and props.rebar_fill!='0':value*=gdetail
-        setattr(p.break_rebar,name,value)
-    if hasattr(p.break_rebar,'stable_volume'):
-        p.break_rebar.stable_volume=props.boolean_stable_volume and props.rebar_fill=='1'
-        p.break_rebar.volume_axis=int(props.boolean_volume_axis)
-        p.break_rebar.volume_budget=props.boolean_volume_budget
-        p.break_rebar.volume_clearance=props.boolean_volume_clearance*gscale
-        p.break_rebar.volume_min_length=props.boolean_volume_min_length*gscale
-        p.break_rebar.volume_min_section=props.boolean_volume_min_section
-        for axis in ('x','y','z'):
-            setattr(p.break_rebar,'volume_origin_'+axis,getattr(props,'boolean_volume_origin_'+axis)*gscale)
-        if p.break_rebar.stable_volume:p.break_rebar.brick_3d=False
-    elif props.boolean_stable_volume and props.rebar_fill=='1':
-        raise RuntimeError('Organic Placement requires the updated native core. Restart Blender after updating Project Damage.')
-    if props.rebar_fill in {'2','5'}:
-        p.break_rebar.cover=props.boolean_wood_deepness*gscale
-    from . import break_surface as _break_surface
-    if not getattr(p.break_rebar,'stable_volume',False):_break_surface.fill_rebar_axes(p.break_rebar, props)
-    else:p.break_rebar.axis_mask=0
-                                                                        
-                                                                         
-    if props.rebar_fill!='0':
-        quality=max(.05,props.boolean_quality/100.)
-        p.break_rebar.detail *= quality
-        p.break_rebar.sides=max(4,min(64,round(p.break_rebar.sides*quality)))
-    p.break_rebar.rebar_resolution=preview_quality.rebar_resolution(props,'rebar_resolution')
+    fill_break_rebar(props, core, p.break_rebar, gscale, gdetail)
     p.concrete.rebar_resolution=preview_quality.rebar_resolution(props,'concrete_rebar_resolution')
     p.hang.rebar_resolution=preview_quality.rebar_resolution(props,'hang_rebar_resolution')
-    if props.rebar_fill=='0' and props.rebar_amount>1:
-        density=props.rebar_amount**.5
-        p.break_rebar.spacing_u/=density
-        p.break_rebar.spacing_v/=density
-        p.break_rebar.tie_spacing/=density
-        p.break_rebar.amount=1.
-    if props.rebar_fill=='3':
-        density=props.boolean_frame_amount
-        if density<=0:p.break_rebar.enable=False
-        else:
-            p.break_rebar.stud_spacing/=density
-            p.break_rebar.noggin_spacing/=density
-    if props.boolean_central_rebar and props.rebar_fill == '0':
-        if not getattr(core, 'central_rebar_layout', False):
-            raise RuntimeError('Central Rebar requires the updated native core. Restart Blender after updating Project Damage.')
-        central = p.break_rebar
-        central.layout = 4
-        central.axis = int(props.boolean_central_axis)
-        central.axis_mask = 0
-        central.radius = props.boolean_central_diameter * .5 * gscale
-        central.embed = props.boolean_central_embed * gscale
-        central.scale = 1.
-        central.mode = 0
-        central.cover = central.reach = central.min_exposed = 0.
-        central.amount = 1.
-        central.wobble = central.bow = central.bend = central.broken = 0.
-        central.jitter = central.deform = central.trim = central.neck = 0.
-        central.core = central.show_all = False
     if obj is not None:
         from . import input_prep
         p.glass.thickness_logic=0 if input_prep.settings(obj).thickness_logic=='LEGACY' else 1
@@ -778,6 +713,76 @@ def fill_params(props, core, obj=None, geometry=None):
     from . import generated_geometry
     generated_geometry.fill(p, props)
     return p
+
+
+def fill_break_rebar(props, core, block, gscale, gdetail):
+    all_off = props.all_off
+    from .rebar import FIELDS
+    block.enable = bool(props.rebar_enable and props.ui_boolean_enable and not all_off)
+    if hasattr(block,'experimental_riven'):
+        block.experimental_riven=False
+    if hasattr(block, 'existing_damage'):
+        block.existing_damage = bool(props.rebar_existing_damage)
+    for name,kind,default,is_length in FIELDS:
+        if name=='enable':continue
+        if name.startswith('chip_') and not hasattr(block,name):continue
+        value=getattr(props,'rebar_'+('fill' if name=='material' else name))
+        if isinstance(value,str):value=int(value)
+        if is_length:value*=gscale
+        if name=='detail' and props.rebar_fill!='0':value*=gdetail
+        setattr(block,name,value)
+    if hasattr(block,'stable_volume'):
+        block.stable_volume=props.boolean_stable_volume and props.rebar_fill=='1'
+        block.volume_axis=int(props.boolean_volume_axis)
+        block.volume_budget=props.boolean_volume_budget
+        block.volume_clearance=props.boolean_volume_clearance*gscale
+        block.volume_min_length=props.boolean_volume_min_length*gscale
+        block.volume_min_section=props.boolean_volume_min_section
+        for axis in ('x','y','z'):
+            setattr(block,'volume_origin_'+axis,getattr(props,'boolean_volume_origin_'+axis)*gscale)
+        if block.stable_volume:block.brick_3d=False
+    elif props.boolean_stable_volume and props.rebar_fill=='1':
+        raise RuntimeError('Organic Placement requires the updated native core. Restart Blender after updating Project Damage.')
+    if props.rebar_fill in {'2','5'}:
+        block.cover=props.boolean_wood_deepness*gscale
+    from . import break_surface as _break_surface
+    if not getattr(block,'stable_volume',False):_break_surface.fill_rebar_axes(block, props)
+    else:block.axis_mask=0
+                                                                        
+                                                                         
+    if props.rebar_fill!='0':
+        quality=max(.05,props.boolean_quality/100.)
+        block.detail *= quality
+        block.sides=max(4,min(64,round(block.sides*quality)))
+    block.rebar_resolution=preview_quality.rebar_resolution(props,'rebar_resolution')
+    if props.rebar_fill=='0' and props.rebar_amount>1:
+        density=props.rebar_amount**.5
+        block.spacing_u/=density
+        block.spacing_v/=density
+        block.tie_spacing/=density
+        block.amount=1.
+    if props.rebar_fill=='3':
+        density=props.boolean_frame_amount
+        if density<=0:block.enable=False
+        else:
+            block.stud_spacing/=density
+            block.noggin_spacing/=density
+    if props.boolean_central_rebar and props.rebar_fill == '0':
+        if not getattr(core, 'central_rebar_layout', False):
+            raise RuntimeError('Central Rebar requires the updated native core. Restart Blender after updating Project Damage.')
+        central = block
+        central.layout = 4
+        central.axis = int(props.boolean_central_axis)
+        central.axis_mask = 0
+        central.radius = props.boolean_central_diameter * .5 * gscale
+        central.embed = props.boolean_central_embed * gscale
+        central.scale = 1.
+        central.mode = 0
+        central.cover = central.reach = central.min_exposed = 0.
+        central.amount = 1.
+        central.wobble = central.bow = central.bend = central.broken = 0.
+        central.jitter = central.deform = central.trim = central.neck = 0.
+        central.core = central.show_all = False
 
 
 def _nothing_asked_for(params):

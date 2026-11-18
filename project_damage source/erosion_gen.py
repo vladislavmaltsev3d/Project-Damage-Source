@@ -278,6 +278,16 @@ def add_object(op, context):
             s.resolution = float(max(dims.max() / 160.0, 0.0005))
         finally:
             G._building = False
+    else:
+        # Added at the 3D cursor with no mesh to weather: start from a stone
+        # block instead of the Source Mesh shape, which had nothing to read
+        # and cancelled with "pick a Source mesh".
+        s = G.settings_of(obj)
+        G._building = True
+        try:
+            s.shape = 'BLOCK'
+        finally:
+            G._building = False
     return obj
 
 

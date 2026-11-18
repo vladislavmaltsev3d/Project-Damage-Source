@@ -10,11 +10,6 @@ SUPPORTED = {'CENTRAL', 'REBAR', 'BRICKS', 'PLANKS', 'FRAMING', 'PIPES', 'CABLES
 HELPER = 'project_damage_auto_break_helper'
 
 
-def preference_enabled(context):
-    entry = context.preferences.addons.get(__package__)
-    return bool(entry and getattr(entry.preferences, 'auto_setup_rebar', False))
-
-
 def existing_damage_size(context, source):
     """Read the current damage result once; never create a cutter or modify it.
 
@@ -76,6 +71,7 @@ def setup_existing(context, source):
     previous = live._APPLYING
     live._APPLYING = True
     try:
+        p.rebar_existing_damage = True
         if variant in {'PIPES', 'CABLES'}:
             prefix = 'pipe' if variant == 'PIPES' else 'cable'
             scale = max(.01, getattr(p, 'boolean_' + prefix + '_scale') / 100.)
@@ -88,7 +84,6 @@ def setup_existing(context, source):
                 p.pipe_wall = min(p.pipe_wall, p.pipe_diameter * .25)
             return
 
-        p.rebar_existing_damage = True
         if variant == 'CENTRAL':
             return
         p.rebar_mode = '0'

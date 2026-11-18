@@ -89,11 +89,13 @@ def signature(obj, *, matrix=None, local=False):
                     'project_damage_metal_strength')))
     digest = hashlib.blake2b(digest_size=16)
     digest.update(repr(_matrix(matrix)).encode())
+    from . import guide_timing
+    held = guide_timing.uses_held_frame(obj)
     for layer in obj.data.layers:
         if layer.hide:
             continue
         modern = hasattr(layer, 'current_frame')
-        frame = layer.current_frame() if modern else layer.active_frame
+        frame = guide_timing.frame(layer, held)
         if frame is None:
             continue
         strokes = frame.drawing.strokes if modern else frame.strokes

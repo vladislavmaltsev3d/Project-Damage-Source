@@ -18,7 +18,7 @@
 bl_info = {
     "name": "Project Damage | Procedural Destruction Toolkit",
     "author": "Lazy3D",
-    "version": (0, 15, 49),
+    "version": (1, 0, 0),
     "blender": (4, 2, 0),
     "location": "3D View > Sidebar > project_damage",
     "description": "Complete Damage and Destruction Effect Toolkit",
@@ -26,8 +26,16 @@ bl_info = {
 }
 
                                                                               
-CORE_VERSION = '0.15.49'
+CORE_VERSION = '1.0.0'
 UI_REVISION = 10
+
+# Files staged by Install Project Damage Package (for example a locked native
+# core) are moved into place here, before anything loads the core.
+from . import package_install
+try:
+    package_install.apply_pending()
+except Exception as _exc:
+    print('Project Damage: pending package files not applied:', _exc)
 
 from . import ownership, new_effects, breaker, build, clean_floating, core_loader, extra_effects, gizmo, input_prep, live, manual, paint, panels, presets, props
                                                                         
@@ -65,10 +73,11 @@ _MODULES = (runtime_lookup, voxel_erosion, editorial, ui_image_hints, inner_roug
 
 
 from . import structure_surface, quality_ui, preset_pack
-from . import material_roles
-from . import pd_retopo, plank_surface, viewport_helpers, preset_browser, cell_cuts, cell_cut_plane, paper_generator
-_MODULES += (preset_pack,structure_surface,pd_retopo,plank_surface,viewport_helpers,preset_browser,cell_cuts,cell_cut_plane,paper_generator)
-_MODULES += (material_roles,)
+from . import material_roles, material_defaults
+from . import plank_surface, viewport_helpers, preset_browser, cell_cuts, cell_cut_plane, paper_generator
+_MODULES += (preset_pack,structure_surface,plank_surface,viewport_helpers,preset_browser,cell_cuts,cell_cut_plane,paper_generator)
+_MODULES += (material_roles, material_defaults)
+_MODULES += (package_install,)
 
 def _register_modules():
     from . import ui_hints
@@ -98,6 +107,10 @@ _REGISTERED=False
 def register():
     global _REGISTERED
     if _REGISTERED:return
+    import bpy
+    registered = bpy.types.PropertyGroup.bl_rna_get_subclass_py('ProjectDamageProps', None)
+    if registered is not None and not registered.__module__.startswith(__package__ + '.'):
+        raise RuntimeError('Project Damage is already enabled. Disable the other installation before enabling this copy.')
                                                                             
                                                                       
     from . import asset_updates,registration
@@ -108,12 +121,17 @@ def register():
     with registration.guard():_register_modules()
     quality_ui.register()
     ui_hints.apply_registered_descriptions()
+    # descriptions were just redefined: cached RNA property lists must be rebuilt
+    from . import rna_fields
+    rna_fields.clear()
     _REGISTERED=True
 
 # убираем подключения модуля при выключении аддона
 def unregister():
     quality_ui.unregister()
     global _REGISTERED
+    from . import rna_fields
+    rna_fields.clear()
     from . import registration
     errors=[]
     with registration.guard():

@@ -26,6 +26,7 @@ Python only: no core rebuild needed. It reuses the pipe layout of pipes.py
 (paint strokes), Boolean Cables the existing breaker cut."""
 from . import output_collections
 from . import ui_image_hints
+from bisect import bisect_left
 import copy
 import math
 import hashlib
@@ -157,6 +158,10 @@ PROPS = {
                                            update=live.touch_prop, description='Direction of the cable runs'),
     'cable_count': bpy.props.IntProperty(name='Runs per Direction', default=2, min=1, max=40, update=live.touch_prop,
                                          description='Number of cable runs for each direction, spread over the wall'),
+    'cable_run_gap': _length(
+        'Distance Between Cables (cm)', 0.0,
+        'Minimum clear space between parallel cable runs at placement. '
+        'Zero uses the original automatic spacing. Bundle Gap sets the space within a run'),
     'cable_bundle': bpy.props.IntProperty(name='Cables per Run', default=3, min=1, max=12, update=live.touch_prop,
                                           description='Cables laid side by side in one run'),
     'cable_bundle_gap': _length('Bundle Gap (cm)', 3.0, 'Space between the cables of one run', 10.0),
@@ -227,6 +232,7 @@ class Settings:
         self.cover = max(p.cable_cover, 0.0) * gscale
         self.bundle = max(1, int(p.cable_bundle))
         self.gap = max(p.cable_bundle_gap, 0.0) * gscale
+        self.run_gap = p.cable_run_gap * gscale
         self.half_width = 0.5 * (self.bundle * self.Dw + (self.bundle - 1) * self.gap)
         self.embed = max(p.cable_embed, 0.0) * gscale
         self.joint = 0.0
@@ -894,14 +900,13 @@ def _type_material(kind):
     return pipes._plain_material(name, t['color'], t['rough'], t['metal'])
 
 
-def cables_of(source):
-    uid = source.get('project_damage_uid')
-    return next((o for o in bpy.data.objects if uid is not None and o.type == 'MESH'
-                 and o.get(CABLES_STAMP) == uid), None)
+def cables_of(source, instance=0):
+    from . import wall_stack
+    return next(wall_stack.output_objects(source, CABLES_STAMP, instance), None)
 
 
-def _remove(source):
-    obj = cables_of(source)
+def _remove(source, instance=0):
+    obj = cables_of(source, instance)
     if obj is not None:
         mesh = obj.data
         bpy.data.objects.remove(obj, do_unlink=True)
@@ -945,9 +950,9 @@ def _mesh_from(buf, name, factor, p):
     return mesh
 
 
-def _place(context, source, mesh):
-    obj = cables_of(source)
-    name = source.name + '_project_damage_cables'
+def _place(context, source, mesh, instance=0):
+    obj = cables_of(source, instance)
+    name = source.name + '_project_damage_cables' + (f' #{instance}' if instance else '')
     if obj is None:
         obj = bpy.data.objects.new(name, mesh)
     else:
@@ -958,6 +963,9 @@ def _place(context, source, mesh):
     obj.name = name
     mesh.name = name
     obj[CABLES_STAMP] = source.get('project_damage_uid')
+    if instance:
+        from .wall_stack import INSTANCE
+        obj[INSTANCE] = instance
     ownership.bind(source, obj)
     output_collections.link_object(context,source,obj)
     obj.matrix_world = source.matrix_world
@@ -980,9 +988,9 @@ def wanted(p):
     return (boolean_wanted(p) or damage_wanted(p)) and pipes.axes_of(p, 'cable') != ()
 
 
-def _drawn(context, source, factor):
+def _drawn(context, source, factor, *, props=None):
     from . import paint
-    p = source.project_damage
+    p = source.project_damage if props is None else props
     s = _scale(source)
     return [np.ascontiguousarray(path * factor * s, dtype=np.float64)
             for path in paint.read_paths(context, source, p.concrete_drawing)]
@@ -1157,6 +1165,23 @@ def _densify(path, step):
     return np.asarray(out, dtype=np.float64)
 
 
+def _spaced_positions(lo, hi, limit, spacing, rng, occupied):
+    """Spread the available runs across the stroke while reserving the minimum gap."""
+    span = hi - lo
+    count = min(limit, int(span / spacing) + 1)
+    slack = max(0.0, span - (count - 1) * spacing)
+    minimum = spacing - 1e-9 * spacing
+    for i in range(count):
+        pos = lo + i * spacing + slack * (i + 0.5 + rng.uniform(-0.3, 0.3)) / count
+        index = bisect_left(occupied, pos)
+        if index and pos - occupied[index - 1] < minimum:
+            continue
+        if index < len(occupied) and occupied[index] - pos < minimum:
+            continue
+        occupied.insert(index, pos)
+        yield pos
+
+
 def area_runs(S, points, src_bvh, areas, first=0, key=0):
     """Cable runs through the painted areas: Runs per Direction in each area,
     placed where the strokes are, running on through the whole wall. Run
@@ -1175,19 +1200,23 @@ def area_runs(S, points, src_bvh, areas, first=0, key=0):
         dirs.append((eu, h, up))
     if S.layout in {'V', 'BOTH'}:
         dirs.append((eh, up, h))
-    spacing = 2.0 * S.half_width + S.D
+    spacing = 2.0 * S.half_width + (S.run_gap or S.D)
+    occupied = {ai: [] for _, _, ai in dirs}
     runs = []
     for blo, bhi, pts in areas:
         for across, di, ai in dirs:
                                                                               
             v0, v1 = float(pts[:, ai].min()), float(pts[:, ai].max())
-            n = max(1, min(S.count, int((v1 - v0) // spacing) + 1))
-            cand = sorted(v0 + (v1 - v0) * min(max((i + 0.5 + rng.uniform(-0.3, 0.3)) / n, 0.0), 1.0)
-                          for i in range(n))
-            placed = []
-            for pos in cand:
-                if all(abs(pos - q) >= spacing for q in placed):
-                    placed.append(pos)
+            if S.run_gap:
+                placed = list(_spaced_positions(v0, v1, S.count, spacing, rng, occupied[ai]))
+            else:
+                n = max(1, min(S.count, int((v1 - v0) // spacing) + 1))
+                cand = sorted(v0 + (v1 - v0) * min(max((i + 0.5 + rng.uniform(-0.3, 0.3)) / n, 0.0), 1.0)
+                              for i in range(n))
+                placed = []
+                for pos in cand:
+                    if all(abs(pos - q) >= spacing for q in placed):
+                        placed.append(pos)
             for pos in placed:
                 start = np.zeros(3)
                 start[a] = plane
@@ -1221,6 +1250,11 @@ def _paint_radius(p, source):
 def _face_runs(S, points, src_bvh, groups, side=None):
     """Runs for the areas of every face; `side` (chosen by hand) replaces the
     face each group was found on."""
+    if S.run_gap and side is not None:
+        by_axis = {}
+        for axis, _, areas in groups:
+            by_axis.setdefault(axis, []).extend(areas)
+        groups = [(axis, side, areas) for axis, areas in by_axis.items()]
     runs = []
     for key, (axis, found, areas) in enumerate(groups):
         Sg = copy.copy(S)
@@ -1234,37 +1268,46 @@ def _mesh_polys(mesh):
     return [tuple(pl.vertices) for pl in mesh.polygons]
 
 
-def runs_for(context, source, S, points, src_bvh, factor, polys=None, res_bvh=None):
-    p = source.project_damage
+def _whole_wall_runs(S, points, src_bvh):
+    if not S.run_gap:
+        return pipes.auto_runs(S, points, src_bvh)
+    lo, hi, _, _, _ = pipes._axes(points, S.axis)
+    inset = np.minimum(0.5 * (hi - lo), S.half_width + S.D)
+    area = (lo, hi, np.vstack((lo + inset, hi - inset)))
+    return area_runs(S, points, src_bvh, [area])
+
+
+def runs_for(context, source, S, points, src_bvh, factor, polys=None, res_bvh=None, *, props=None):
+    p = source.project_damage if props is None else props
     axes = S.axes
     side = p.cable_side if axes is not None and p.cable_side != 'AUTO' else None
     if damage_wanted(p):
                                                                                   
-        groups = paint_areas(S, _drawn(context, source, factor), points, _paint_radius(p, source), src_bvh, axes)
+        groups = paint_areas(S, _drawn(context, source, factor, props=p), points, _paint_radius(p, source), src_bvh, axes)
         return _face_runs(S, points, src_bvh, groups, side)
     if boolean_wanted(p) and polys is not None and res_bvh is not None:
                                                                                  
         return _face_runs(S, points, src_bvh, damage_areas(S, points, polys, res_bvh, axes), side)
     if axes is None:
-        return pipes.auto_runs(S, points, src_bvh)
+        return _whole_wall_runs(S, points, src_bvh)
     runs = []
     for k, i in enumerate(axes):                                             
         Sg = copy.copy(S)
         Sg.axis = 'XYZ'[i]
         Sg.side = _resolve_side(p.cable_side, Sg.axis, source, points)
         Sg.seed = S.seed + k
-        for run in pipes.auto_runs(Sg, points, src_bvh):
+        for run in _whole_wall_runs(Sg, points, src_bvh):
             run.index = len(runs)
             runs.append(run)
     return runs
 
 
 # готовим данные этого эффекта перед расчётом геометрии
-def before_core(context, source, params, points, polys, factor, concrete_strokes, reports):
+def before_core(context, source, params, points, polys, factor, concrete_strokes, reports, *, props=None):
     """build.rebuild_object, before the fingerprint and the core call. Cable
     Damage takes over the Concrete Damage block: paint strokes along the
     cables, no rebar, deep enough to reach them. Returns the concrete strokes."""
-    p = source.project_damage
+    p = source.project_damage if props is None else props
     uid = source.get('project_damage_uid')
     if not wanted(p):
         _INPUTS.pop(uid, None)
@@ -1280,7 +1323,7 @@ def before_core(context, source, params, points, polys, factor, concrete_strokes
     points_s = np.asarray(points, dtype=np.float64) * sc
     S = Settings(p, pipes._gscale(p), source, points_s, polys)
     src_bvh = _bvh(points_s, polys, guide=True)
-    strokes = _drawn(context, source, factor)
+    strokes = _drawn(context, source, factor, props=p)
     if not strokes:
         reports.append(({'INFO'}, 'Cable Damage: draw the damaged area to create cables'))
                                                
@@ -1310,20 +1353,21 @@ def _uv_topology(mesh):
     return digest.digest()
 
 
-def after_build(context, source, res, reports=None, *, body_has_damage=True):
+def after_build(context, source, res, reports=None, *, body_has_damage=True, props=None, instance=0, damage=True, cut_body=None):
     """Keep the cables uncovered by the complete damaged body, before splitting it."""
-    p = source.project_damage
+    p = source.project_damage if props is None else props
     boolean = boolean_wanted(p) and not damage_wanted(p)
     from .generated_geometry import enabled
-    if not enabled(p, 'boolean' if boolean else 'cable'):
-        _remove(source)
+    if (not damage and not boolean) or not enabled(p, 'boolean' if boolean else 'cable'):
+        _remove(source, instance)
         return None
     if res is None or res.type != 'MESH' or not wanted(p) or (boolean and not body_has_damage):
-        _remove(source)
+        _remove(source, instance)
         return None
     from . import incremental
-    existing=cables_of(source)
-    if incremental.reuse_output(context,source,res,'cables',existing):return existing
+    existing=cables_of(source, instance)
+    cache_key = 'cables' if not instance else ('cables', instance)
+    if not instance and incremental.reuse_output(context,source,res,cache_key,existing):return existing
     from .params import unit_factor
     factor = unit_factor(context)
     uid = source.get('project_damage_uid')
@@ -1342,9 +1386,10 @@ def after_build(context, source, res, reports=None, *, body_has_damage=True):
         points = co.reshape(-1, 3) * factor * sc
         src_bvh = _mesh_bvh(mesh, scale_m, factor, guide=True)
     if src_bvh is None or len(points) == 0:
-        _remove(source)
+        _remove(source, instance)
         return None
-    res_bvh = _mesh_bvh(res.data, scale_m @ source.matrix_world.inverted() @ res.matrix_world, factor)
+    res_bvh = (_bvh(np.asarray(cut_body['points']) * sc, cut_body['polys']) if cut_body is not None else
+               _mesh_bvh(res.data, scale_m @ source.matrix_world.inverted() @ res.matrix_world, factor))
     scale=pipes._gscale(p)
     if not damage_wanted(p):scale*=p.boolean_cable_scale/100.
     S = Settings(p, scale, source, points, polys)
@@ -1354,22 +1399,22 @@ def after_build(context, source, res, reports=None, *, body_has_damage=True):
     if polys is None:
         polys = _mesh_polys(source.data)
     runs = [] if boolean and S.axes == () else runs_for(
-        context, source, S, points, src_bvh, factor, polys, res_bvh)
+        context, source, S, points, src_bvh, factor, polys, res_bvh, props=p)
     buf, counts = build_cables(S, runs, src_bvh, res_bvh, _down(source), boolean=boolean)
     if not buf.faces:
-        _remove(source)
+        _remove(source, instance)
         if reports is not None:
             reports.append(({'INFO'}, 'Cables: the damage does not reach the cables yet'))
         return None
     from . import material_uv,material_controls,effect_groups
     uv_snapshots=material_uv.capture(source)
-    previous=cables_of(source)
+    previous=cables_of(source, instance)
     rope_uv=None
     if previous is not None and material_uv.has_uv(previous):
         values=np.empty(len(previous.data.loops)*2,np.float32)
         previous.data.uv_layers[material_uv.UV_NAME].data.foreach_get('uv',values)
         rope_uv=(_uv_topology(previous.data),values)
-    obj = _place(context, source, _mesh_from(buf, source.name + '_project_damage_cables', factor * sc, p))
+    obj = _place(context, source, _mesh_from(buf, source.name + '_project_damage_cables', factor * sc, p), instance)
     if rope_uv is not None and rope_uv[0]==_uv_topology(obj.data):
         layer=obj.data.uv_layers.get(material_uv.UV_NAME) or obj.data.uv_layers.new(name=material_uv.UV_NAME)
         layer.data.foreach_set('uv',rope_uv[1])
@@ -1382,14 +1427,17 @@ def after_build(context, source, res, reports=None, *, body_has_damage=True):
     obj.hide_render = False
     if reports is not None:
         reports.append(({'INFO'}, 'Cables: %d pieces, %d cut ends' % (counts['pieces'], counts['cut'])))
-    incremental.remember_output(context,source,res,'cables',obj)
+    if not instance:
+        incremental.remember_output(context,source,res,cache_key,obj)
     return obj
 
 
 def follow_source(source):
-    obj = cables_of(source)
-    if obj is not None:
-        obj.matrix_world = source.matrix_world
+    uid = source.get('project_damage_uid')
+    if uid:
+        for obj in bpy.data.objects:
+            if obj.get(CABLES_STAMP) == uid:
+                obj.matrix_world = source.matrix_world
 
 
                                                                              
@@ -1418,6 +1466,7 @@ def draw_cable_settings(layout, p, damage=False):
     col.prop(p,'cable_sides',text='Resolution')
     ui_image_hints.prop(col,p,'cable_layout')
     col.prop(p,'cable_count',text='Amount')
+    col.prop(p,'cable_run_gap')
     col.prop(p,'cable_bundle')
     col.prop(p,'cable_bundle_gap')
     col.prop(p,'cable_turns')
@@ -1485,8 +1534,9 @@ def draw_settings(layout, context):
         col.prop(p,'concrete_crack_length_max')
         col.prop(p,'concrete_crack_width')
         col.prop(p,'concrete_crack_depth')
+    from . import through_holes
     col=recording_tools.toggle_box(layout,p,'concrete_hole_enable','Break Through')
-    if col is not None:
+    if col is not None and through_holes.draw_controls(col, p, 'concrete'):
         col.prop(p,'concrete_hole_chance')
         col.prop(p,'concrete_hole_size')
         col.prop(p,'concrete_hole_jagged')

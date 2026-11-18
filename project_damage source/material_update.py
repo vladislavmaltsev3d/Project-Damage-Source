@@ -27,6 +27,7 @@ OUTPUTS = {
     'cable_material': ('cables', 0),
     'concrete_rebar_material': ('concrete_rebar', 0),
     'surface_rebar_material': ('surface_rebar', 0),
+    'rebar_drawn_material': ('drawn_rebar', 0),
     'hang_cable_material': ('rebar', 1),
 }
 REBAR_FIELDS = {
@@ -242,15 +243,49 @@ def body_mask(mesh, source, field):
     return mask
 
 
+def output_object(source, key, field):
+    from . import boolean_stack, runtime_lookup, wall_stack
+
+    stamp = f'project_damage_{key}_of'
+    if key not in {'rebar', 'drawn_rebar', 'pipes', 'cables', 'lath', 'concrete_rebar'}:
+        return runtime_lookup.output(source, stamp)
+    p = source.project_damage
+    boolean = boolean_stack.edited(source)
+    wall = wall_stack.edited(source)
+    serial = 0
+    if field == 'hang_cable_material':
+        if not p.hang_enable:
+            return None
+    elif boolean is not None and key in {'rebar', 'drawn_rebar', 'pipes', 'cables'}:
+        enabled = {'rebar': p.rebar_enable, 'drawn_rebar': p.rebar_enable,
+                   'pipes': p.pipe_break_enable, 'cables': p.cable_break_enable}
+        if not enabled[key]:
+            return None
+        serial = boolean_stack.OUTPUT_OFFSET + boolean[boolean_stack.INSTANCE]
+    elif wall is not None and key not in {'rebar', 'drawn_rebar'}:
+        matches = {'pipes': wall.key == 'pipes', 'cables': wall.key == 'cables',
+                   'lath': wall.key in wall_stack.WOOD, 'concrete_rebar': wall.key in {'concrete', 'concrete_v2'}}
+        if not matches[key]:
+            return None
+        serial = wall[wall_stack.INSTANCE]
+    return next(wall_stack.output_objects(source, stamp, serial), None)
+
+
 def apply_field(source, field, material):
-    from . import boolean_break, build, debris_output, runtime_lookup
+    from . import boolean_break, boolean_stack, build, debris_output
 
     result = build.result_of(source)
     bodies = [result] if result is not None else []
-    if source.project_damage.break_separate:
+    row = boolean_stack.edited(source)
+    if boolean_break.wanted(source):
         bodies.extend(boolean_break.fragments_of(source))
     for obj in bodies:
         mask = body_mask(obj.data, source, field)
+        if mask is not None and field == 'boolean_break_material' and row is not None:
+            owners = face_values(obj.data, boolean_stack.FACE_OWNER)
+            if owners is None:
+                continue
+            mask &= owners == row[boolean_stack.INSTANCE]
         if mask is not None:
             assign(obj, material, mask)
 
@@ -265,32 +300,39 @@ def apply_field(source, field, material):
             output = ('rebar', 1)
     if output is not None:
         key, index = output
-        obj = runtime_lookup.output(source, f'project_damage_{key}_of')
+        obj = output_object(source, key, field)
         if obj is not None and field == 'rebar_brick_material' and source.project_damage.rebar_brick_3d:
             for slot in range(len(obj.material_slots)):
                 assign_slot(obj, slot, material)
         else:
             assign_slot(obj, index, material)
     if field in FRACTURE_OUTPUTS:
-        for obj in debris_output.objects_of(source, FRACTURE_OUTPUTS[field]):
+        from . import fracture_uv
+        for obj in fracture_uv.with_details(debris_output.objects_of(source, FRACTURE_OUTPUTS[field])):
             base = face_values(obj.data, 'project_damage_debris_base_poly')
             if base is not None:
-                assign(obj, material, base < 0)
+                assign(obj, material, base < 0, uv_name=fracture_uv.layer_name(obj.data))
 
 
 def callback(field, original):
     def update(props, context):
-        from . import live
+        from . import live, material_controls
         if live._APPLYING or live._HISTORY_RESTORING:
             return
+        if field in material_controls.TUBE_MATERIAL_FIELDS:
+            for key in material_controls.automatic_material_keys(field):
+                if key in props:
+                    del props[key]
         material = getattr(props, field)
         if material is None:
             # Existing generators may need to recover a procedural or inherited default.
             if original is not None:
                 original(props, context)
             return
+        from . import wall_stack
         with shader_edit(context):
-            apply_field(props.id_data, field, material)
+            if not wall_stack.update_material(props.id_data, field, material):
+                apply_field(props.id_data, field, material)
         expect_rna_notification(props.id_data)
     return update
 

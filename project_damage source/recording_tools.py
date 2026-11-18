@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Seed creation, editable weld masks, and isolated additive-material regions."""
 from .blender_compat import enable_nodes
+import bmesh
 import bpy
 import numpy as np
 from . import ownership,live
@@ -92,17 +93,121 @@ class PROJECT_DAMAGE_OT_add_growth_seed(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def needs_seed(source,kind):
+    """Ivy or Roots is on but nothing tells it where to start: nothing can grow."""
+    if source is None or not getattr(source.project_damage,kind+'_enable',False):return False
+    s=getattr(source,'project_damage_'+kind,None)
+    if s is None:return False
+    if s.seeds is not None and any(o.type=='EMPTY' for o in s.seeds.all_objects):return False
+    for attr in ('guide','curve'):
+        if getattr(s,attr,None) is not None:return False
+    return True
+
+
+def _view3d(context):
+    window=context.window
+    if window is None:return None,None
+    area=context.area if context.area is not None and context.area.type=='VIEW_3D' else next(
+        (a for a in window.screen.areas if a.type=='VIEW_3D'),None)
+    if area is None:return None,None
+    return area,next((r for r in area.regions if r.type=='WINDOW'),None)
+
+
+def request_seed(context,source,kinds):
+    """Ask the user to place the 3D cursor and press Enter for each growth kind
+    that has no seed yet. False when there is no window to ask in."""
+    kinds=[k for k in kinds if needs_seed(source,k)]
+    if not kinds or bpy.app.background:return False
+    area,region=_view3d(context)
+    if area is None or region is None:return False
+    with context.temp_override(window=context.window,area=area,region=region):
+        result=bpy.ops.project_damage.place_growth_seed('INVOKE_DEFAULT',source_name=source.name,kinds=','.join(kinds))
+    return 'RUNNING_MODAL' in result
+
+
+# действие «Place Growth Seed»
+class PROJECT_DAMAGE_OT_place_growth_seed(bpy.types.Operator):
+    bl_idname='project_damage.place_growth_seed';bl_label='Place Growth Seed'
+    bl_description='Place the 3D cursor where the ivy or roots start (Shift+Right-click), then press Enter'
+    bl_options={'REGISTER','UNDO'}
+    source_name:bpy.props.StringProperty(options={'HIDDEN','SKIP_SAVE'})
+    kinds:bpy.props.StringProperty(default='ivy',options={'HIDDEN','SKIP_SAVE'})
+    PROMPT='Place the 3D cursor where the {what} should start (Shift+Right-click on the surface), then press Enter  |  Esc: skip'
+
+    def _source(self,context):
+        return bpy.data.objects.get(self.source_name) if self.source_name else ownership.context_source(context)
+
+    def _kinds(self):
+        return [k for k in self.kinds.split(',') if k in {'ivy','roots'}]
+
+    def invoke(self,context,event):
+        source=self._source(context)
+        if source is None or not self._kinds():return {'CANCELLED'}
+        self.source_name=source.name
+        text=self.PROMPT.format(what=' and '.join(self._kinds()))
+        try:context.workspace.status_text_set(text)
+        except (AttributeError,RuntimeError):pass
+        if context.area is not None:context.area.header_text_set(text)
+        context.window_manager.modal_handler_add(self)
+        self.report({'INFO'},text)
+        return {'RUNNING_MODAL'}
+
+    def _finish(self,context):
+        try:context.workspace.status_text_set(None)
+        except (AttributeError,RuntimeError):pass
+        window=context.window
+        for area in (window.screen.areas if window is not None else ()):
+            if area.type=='VIEW_3D':
+                try:area.header_text_set(None)
+                except RuntimeError:pass
+
+    def modal(self,context,event):
+        source=self._source(context)
+        if source is None:
+            self._finish(context);return {'CANCELLED'}
+        if event.type=='ESC' and event.value=='PRESS':
+            self._finish(context)
+            self.report({'INFO'},'No seed placed: use Add Growth Seed in the Ivy / Roots panel when ready')
+            return {'CANCELLED'}
+        if event.type in {'RET','NUMPAD_ENTER'} and event.value=='PRESS':
+            self._finish(context)
+            return self.execute(context)
+        # orbit, zoom, Shift+Right-click to move the cursor: everything else passes through
+        return {'PASS_THROUGH'}
+
+    def execute(self,context):
+        source=self._source(context)
+        if source is None:return {'CANCELLED'}
+        grown=[]
+        with context.temp_override(active_object=source,object=source,selected_objects=[source],selected_editable_objects=[source]):
+            for kind in self._kinds():
+                if bpy.ops.project_damage.add_growth_seed(kind=kind)!={'FINISHED'}:continue
+                try:
+                    if getattr(bpy.ops.project_damage,'grow_'+kind)()=={'FINISHED'}:grown.append(kind)
+                except RuntimeError as exc:
+                    self.report({'WARNING'},'Seed placed; grow it with Grow %s (%s)'%(kind.title(),exc))
+        if grown:self.report({'INFO'},'Seed placed at the 3D cursor: '+', '.join(grown)+' grown')
+        return {'FINISHED'}
+
+
 # действие «Edit Weld Mask»
 class PROJECT_DAMAGE_OT_weld_mask(bpy.types.Operator):
     bl_idname='project_damage.weld_mask';bl_label='Edit Weld Mask';bl_options={'REGISTER','UNDO'}
-    bl_description='Create a Weld Mask group on the current generated mesh; paint weights or assign selected vertices'
-    action:bpy.props.EnumProperty(items=(('PAINT','Weight Paint','Paint the weld area'),('EDIT','Edit Mode','Select vertices for the weld area'),('ASSIGN','Assign Selection','Assign selected vertices to the mask'),('FINISH','Finish Mask','Return to the damage mesh')))
+    bl_description='Edit the weld mask on the original mesh using weights or the On Edges selection'
+    action:bpy.props.EnumProperty(items=(
+        ('PAINT','Weight Paint','Paint the vertex group'),
+        ('EDIT','Edit Mode','Select vertices or edges for the weld area'),
+        ('ASSIGN','Assign Selection','Add the selection to the current mask'),
+        ('FINISH','Finish Mask','Return to the damage mesh'),
+        ('CLEAR_EDGES','Clear Edge Mask','Remove all assigned edges from the edge mask'),
+    ))
     @classmethod
     def poll(cls,context):return ownership.context_source(context) is not None
     def execute(self,context):
-        from . import build,paint
+        from . import build,paint,weld
         source=ownership.context_source(context);s=source.project_damage_weld
         target=source
+        editing_source = context.active_object == target and context.mode == 'EDIT_MESH'
         if self.action=='FINISH':
             if context.mode!='OBJECT':bpy.ops.object.mode_set(mode='OBJECT')
             result=build.result_of(source)
@@ -110,9 +215,40 @@ class PROJECT_DAMAGE_OT_weld_mask(bpy.types.Operator):
                 source.hide_set(True);result.hide_set(False);paint._activate(context,result)
             live.touch_prop(s,context)
             return {'FINISHED'}
+        if self.action=='CLEAR_EDGES':
+            if not editing_source or not s.on_edges:
+                return {'CANCELLED'}
+            bm = bmesh.from_edit_mesh(target.data)
+            mask = bm.edges.layers.int.get(weld.EDGE_MASK)
+            if mask is not None:
+                bm.edges.layers.int.remove(mask)
+                bmesh.update_edit_mesh(target.data, loop_triangles=False, destructive=False)
+            return {'FINISHED'}
         if self.action=='ASSIGN':
-            if context.active_object!=target or context.mode!='EDIT_MESH':return {'CANCELLED'}
-            bpy.ops.object.vertex_group_assign();return {'FINISHED'}
+            if not editing_source:return {'CANCELLED'}
+            if s.on_edges:
+                self._assign_edges(target.data, weld.EDGE_MASK)
+                return {'FINISHED'}
+            return bpy.ops.object.vertex_group_assign()
+        if self.action=='EDIT' and s.on_edges:
+            if not editing_source:
+                if context.mode!='OBJECT':bpy.ops.object.mode_set(mode='OBJECT')
+                target.hide_set(False);paint._activate(context,target)
+                bpy.ops.object.mode_set(mode='EDIT')
+            bpy.ops.mesh.select_mode(type='EDGE')
+            if not editing_source:
+                mesh = target.data
+                bm = bmesh.from_edit_mesh(mesh)
+                mask = bm.edges.layers.int.get(weld.EDGE_MASK)
+                if mask is not None:
+                    bpy.ops.mesh.select_all(action='DESELECT')
+                    for edge in bm.edges:
+                        if not edge.hide and edge[mask]:
+                            edge.select_set(True)
+                    bm.select_flush_mode()
+                    bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
+            self.report({'INFO'},'Select edges and use Assign to Weld Mask to add them')
+            return {'FINISHED'}
         if context.mode!='OBJECT':bpy.ops.object.mode_set(mode='OBJECT')
         group=target.vertex_groups.get(s.mask_group) if s.mask_group else None
         if group is None:group=target.vertex_groups.new(name='PD_Weld_Mask')
@@ -122,7 +258,20 @@ class PROJECT_DAMAGE_OT_weld_mask(bpy.types.Operator):
         self.report({'INFO'},'Paint weights for welds' if self.action=='PAINT' else 'Select vertices, then use Assign to Weld Mask')
         return {'FINISHED'}
 
-CLASSES=(PROJECT_DAMAGE_OT_add_growth_seed,PROJECT_DAMAGE_OT_weld_mask)
+    @staticmethod
+    def _assign_edges(mesh, name):
+        bm = bmesh.from_edit_mesh(mesh)
+        if not any(edge.select and not edge.hide for edge in bm.edges):
+            return
+        mask = bm.edges.layers.int.get(name)
+        if mask is None:
+            mask = bm.edges.layers.int.new(name)
+        for edge in bm.edges:
+            if edge.select and not edge.hide:
+                edge[mask] = 1
+        bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
+
+CLASSES=(PROJECT_DAMAGE_OT_add_growth_seed,PROJECT_DAMAGE_OT_place_growth_seed,PROJECT_DAMAGE_OT_weld_mask)
 
 
 def toggle_box(layout,props,field,title):

@@ -32,6 +32,8 @@ def reset(source,key):
             p.fabric_enable=key=='fabric';p.fabric_solid_enable=key=='fabric_solid'
         if key=='glass_drawn':p.glass_paint_holes_enable=True;p.glass_paint_only=True
         if key=='glass_hit':p.glass_paint_holes_enable=False
+        # a new Surface Damage starts with visible craters (Crater Count 0 did nothing)
+        if key=='surface':p.surf_amount=sidebar.SURFACE_STARTER_CRATERS
         from . import generated_geometry
         family = {'surface':'surface_rebar','pipes':'pipe','cables':'cable','concrete_v2':'concrete',
                   'brick_v2':'brick','lath_v2':'lath','lath_riven':'lath','lath_framing':'lath'}.get(key,key)

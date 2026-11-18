@@ -3,6 +3,7 @@
 """Object-local shader UV variants; canonical materials and shared groups stay untouched."""
 from .blender_compat import uses_nodes
 import hashlib
+import re
 import bpy
 import numpy as np
 
@@ -10,6 +11,7 @@ UV_NAME='ProjectDamage_Zones'
 TAG='project_damage_shader_uv'
 SOURCE='project_damage_shader_source'
 OWNER='project_damage_shader_owner'
+PRESERVE_OUTPUT_UV='project_damage_preserve_output_uv'
 VECTOR_TEXTURES={'TEX_IMAGE','TEX_NOISE','TEX_VORONOI','TEX_WAVE','TEX_MAGIC',
                  'TEX_BRICK','TEX_CHECKER','TEX_GRADIENT','TEX_MUSGRAVE'}
 
@@ -44,7 +46,7 @@ def _needs_uv(tree,seen=None):
 
 
 def _configure_tree(tree,memo,uv_name):
-                                                                        
+
     for node in list(tree.nodes):
         if node.type=='GROUP' and _needs_uv(node.node_tree):
             original=node.node_tree
@@ -64,12 +66,11 @@ def _configure_tree(tree,memo,uv_name):
         if node.type in {'UVMAP','NORMAL_MAP','TANGENT'} and hasattr(node,'uv_map'):
             node.uv_map=uv_name
         if node.type=='TEX_COORD':
-            for name in ('UV','Generated','Object'):
-                socket=node.outputs.get(name)
-                if socket is not None:
-                    for link in list(socket.links):
-                        target=link.to_socket;tree.links.remove(link)
-                        tree.links.new(uv.outputs['UV'],target)
+            socket=node.outputs.get('UV')
+            if socket is not None:
+                for link in list(socket.links):
+                    target=link.to_socket;tree.links.remove(link)
+                    tree.links.new(uv.outputs['UV'],target)
         if node.type in VECTOR_TEXTURES or node.type=='MAPPING':
             socket=node.inputs.get('Vector')
             if socket is not None and not socket.is_linked:tree.links.new(uv.outputs['UV'],socket)
@@ -81,16 +82,37 @@ def _configure_tree(tree,memo,uv_name):
 
 
 def preserve_generated_uv(material):
+    from .material_defaults import NAMES
     original=base_material(material)
     if original is None:return False
-    return __import__('re').sub(r'\.\d{3}$','',original.name.split(' | PD UV')[0]) in {'Wood Planks Shader | Project Damage','Framing Timber Shader | Project Damage'}
+    name=re.sub(r'\.\d{3}$','',original.name.split(' | PD UV')[0])
+    return name in {NAMES[key] for key in ('wood_planks','framing','rebar','brick','mortar')}
+
+
+def preserve_output_uv(obj):
+    from .uv_zones import preserves_output_uv
+    return obj is not None and preserves_output_uv(obj)
 
 
 def for_object(material,obj,uv_name=UV_NAME):
     if material is None:return None
     pinned = isinstance(material.get('project_damage_pin_owner'), bpy.types.Object)
-    if preserve_generated_uv(material):return material if pinned else base_material(material)
     if not uv_name or obj is None or obj.type != 'MESH' or obj.data.uv_layers.get(uv_name) is None:return material if pinned else base_material(material)
+    from . import fracture_uv
+    if uv_name != fracture_uv.layer_name(obj.data):
+        if preserve_generated_uv(material) or preserve_output_uv(obj):
+            return material if pinned else base_material(material)
+        from . import ownership
+        source = obj.get('project_damage_baked_backup')
+        if not isinstance(source, bpy.types.Object):
+            source = ownership.source_of(obj)
+        if source is not None and source != obj and source.type == 'MESH':
+            source_materials = {slot.material for slot in source.material_slots}
+            if material in source_materials:
+                return material
+            original = base_material(material)
+            if original in source_materials:
+                return original
     if material.get(TAG)!=uv_name and (not uses_nodes(material) or not _needs_uv(material.node_tree)):
         return material
     if material.get(TAG)==uv_name and material.get(OWNER)==obj and not used_elsewhere(material,obj):
@@ -101,8 +123,8 @@ def for_object(material,obj,uv_name=UV_NAME):
                 and (existing.get(SOURCE)==original if pinned else base_material(existing)==original)
                 and not used_elsewhere(existing,obj)):
             return existing
-                                                                                
-                                                                           
+
+
     result=material.copy();result.name=material.name+' | PD UV'
     result[TAG]=uv_name;result[SOURCE]=original;result[OWNER]=obj
     if uses_nodes(result) and result.node_tree is not None:_configure_tree(result.node_tree,{},uv_name)
@@ -112,6 +134,8 @@ def for_object(material,obj,uv_name=UV_NAME):
 def configure_zones(obj,mask,uv_name=UV_NAME):
     """Assign object-local variants to damaged faces only, not untouched skin."""
     if not uv_name or obj.data.uv_layers.get(uv_name) is None:return 0
+    from . import fracture_uv
+    if uv_name != fracture_uv.layer_name(obj.data) and preserve_output_uv(obj):return 0
     mesh=obj.data
     slots={face.material_index for face,yes in zip(mesh.polygons,mask) if yes}
     remap={}
@@ -149,9 +173,9 @@ def _signature(mesh):
 
 
 def _loop_keys(mesh):
-                                                                              
-                                                                              
-                                                                             
+
+
+
     coords=[tuple(round(float(c),6) for c in vertex.co) for vertex in mesh.vertices]
     keys=[None]*len(mesh.loops)
     for face in mesh.polygons:
@@ -174,6 +198,7 @@ def _reordered_uv(mesh,snapshot):
 def capture(source):
     snapshots={}
     for obj in _owned(source):
+        if preserve_output_uv(obj):continue
         layer=obj.data.uv_layers.get(UV_NAME)
         if layer is None:continue
         values=np.empty(len(obj.data.loops)*2,np.float32);layer.data.foreach_get('uv',values)
@@ -184,6 +209,7 @@ def capture(source):
 def after_build(source,snapshots):
     from . import uv_zones
     for obj in _owned(source):
+        if preserve_output_uv(obj):continue
         snapshot=snapshots.get(obj.name)
         values=None
         if snapshot is not None:
@@ -195,8 +221,8 @@ def after_build(source,snapshots):
             if active is not None:obj.data.uv_layers.active=active
         if has_uv(obj):configure_zones(obj,uv_zones.zone_mask(obj))
         else:
-                                                                            
-                                                                            
+
+
             for slot in obj.material_slots:
                 if slot.material is not None and slot.material.get(TAG)==UV_NAME:
                     slot.material=base_material(slot.material)

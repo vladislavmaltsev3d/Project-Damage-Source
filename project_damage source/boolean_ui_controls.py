@@ -3,6 +3,7 @@
 """Boolean-only master controls and editable reinforcement curves."""
 from . import output_collections
 import bpy
+from mathutils import Vector
 
 
 def touch(self, context):
@@ -64,38 +65,157 @@ def tube_settings(settings, p, prefix):
     return settings
 
 
-# действие «Rebar Curve»
-class PROJECT_DAMAGE_OT_rebar_curve(bpy.types.Operator):
-    bl_idname='project_damage.rebar_curve'
-    bl_label='Rebar Curve'
-    bl_description='Create or edit a Bezier spline to guide the reinforcement bars'
-    bl_options={'REGISTER','UNDO'}
-    action:bpy.props.EnumProperty(items=(('NEW','New Curve','Create an editable bar path'),('EDIT','Edit Curve','Edit the assigned spline')))
+PENDING_START = '_pd_rebar_curve_start'
+PENDING_ADD = '_pd_rebar_curve_add'
+LEGACY_DRAFT = 'pd_pending_rebar_curve'
 
-    def execute(self,context):
-        from . import ownership,paint,live
-        source=ownership.context_source(context)
-        if source is None:return {'CANCELLED'}
-        p=source.project_damage
-        curve=p.rebar_drawing
-        if self.action=='NEW':
-            data=bpy.data.curves.new(source.name+'_RebarPath','CURVE');data.dimensions='3D'
-            spline=data.splines.new('BEZIER');spline.bezier_points.add(1)
-            lo=[min(v[i] for v in source.bound_box) for i in range(3)]
-            hi=[max(v[i] for v in source.bound_box) for i in range(3)]
-            for point,t in zip(spline.bezier_points,(.25,.75)):
-                point.co=(lo[0]+(hi[0]-lo[0])*t,lo[1],(lo[2]+hi[2])*.5)
-                point.handle_left_type=point.handle_right_type='AUTO'
-            curve=bpy.data.objects.new(data.name,data)
-            output_collections.link_object(context,source,curve)
-            curve.matrix_world=source.matrix_world.copy();curve.hide_render=True
-            curve['project_damage_paint_source']=source
-            p.rebar_drawing=curve
-        if curve is None or curve.type!='CURVE':
-            self.report({'WARNING'},'Assign a Curve object to edit a spline');return {'CANCELLED'}
-        paint._activate(context,curve)
-        live.drawing_started(source)
-        if not bpy.app.background:bpy.ops.object.mode_set(mode='EDIT')
+
+def _curve_state(source):
+    from . import boolean_stack
+    row = boolean_stack.edited(source)
+    return source if row is None else row
+
+
+def _legacy_draft(source, state):
+    from . import boolean_stack
+    curve = source.get(LEGACY_DRAFT)
+    if (isinstance(curve, bpy.types.Object) and curve.type == 'CURVE'
+            and curve.get('project_damage_paint_source') == source
+            and curve.get(boolean_stack.INSTANCE, 0) == state.get(boolean_stack.INSTANCE, 0)):
+        return curve
+    return None
+
+
+def start_point(source):
+    state = _curve_state(source)
+    if PENDING_START in state:
+        return Vector(state[PENDING_START])
+    legacy = _legacy_draft(source, state)
+    if legacy is not None and len(legacy.data.splines) == 1:
+        points = legacy.data.splines[0].bezier_points
+        if len(points) == 1:
+            return legacy.matrix_world @ points[0].co
+    return None
+
+
+def curve_creation_step(source):
+    if start_point(source) is not None:
+        return 'END'
+    return 'START' if _curve_state(source).get(PENDING_ADD) else 'ADD'
+
+
+def _clear_start(source, state):
+    from . import paint
+    if PENDING_ADD in state:
+        del state[PENDING_ADD]
+    if PENDING_START in state:
+        del state[PENDING_START]
+    legacy = _legacy_draft(source, state)
+    if legacy is not None:
+        del source[LEGACY_DRAFT]
+        paint.delete_unshared_drawing(source, legacy)
+
+
+class PROJECT_DAMAGE_OT_rebar_curve(bpy.types.Operator):
+    bl_idname = 'project_damage.rebar_curve'
+    bl_label = 'Rebar Curve'
+    bl_description = 'Use the 3D Cursor to set the endpoints of a bar curve or edit the assigned curve'
+    bl_options = {'REGISTER', 'UNDO'}
+    action: bpy.props.EnumProperty(items=(
+        ('ADD', 'Add', 'Start creating a hand-drawn bar'),
+        ('START', 'Set Start Point', 'Store the current 3D Cursor position as the start of the curve'),
+        ('END', 'Set End Point', 'Create the curve from the saved start to the 3D Cursor'),
+        ('EDIT', 'Edit Curve', 'Edit the assigned spline'),
+        ('CANCEL', 'Cancel', 'Clear the saved start point'),
+    ))
+
+    @classmethod
+    def poll(cls, context):
+        from . import boolean_break, ownership
+        source = ownership.context_source(context)
+        return source is not None and source.type == 'MESH' and boolean_break.variant(source.project_damage) == 'REBAR'
+
+    def execute(self, context):
+        from . import background_compute, boolean_stack, build, live, ownership, paint
+        source = ownership.context_source(context)
+        if self.action == 'EDIT':
+            curve = source.project_damage.rebar_drawing
+            if curve is None or curve.type != 'CURVE':
+                self.report({'WARNING'}, 'Assign a Curve object to edit a spline')
+                return {'CANCELLED'}
+            if context.active_object != curve or curve.mode != 'EDIT':
+                paint._activate(context, curve)
+                bpy.ops.object.mode_set(mode='EDIT')
+            return {'FINISHED'}
+
+        state = _curve_state(source)
+        if self.action == 'ADD':
+            state[PENDING_ADD] = True
+            if not bpy.app.background:
+                def instructions(menu, _context):
+                    menu.layout.label(text='Place the 3D Cursor, then click Set Start Point in the panel.')
+                    menu.layout.label(text='Move the 3D Cursor, then click Set End Point.')
+                context.window_manager.popup_menu(instructions, title='Add Hand-Drawn Rebar', icon='INFO')
+            return {'FINISHED'}
+        position = context.scene.cursor.location.copy()
+        if self.action == 'START':
+            state[PENDING_START] = list(position)
+            return {'FINISHED'}
+        if self.action == 'CANCEL':
+            _clear_start(source, state)
+            return {'FINISHED'}
+        start = start_point(source)
+        if start is None:
+            self.report({'WARNING'}, 'Set the start point before setting the end point')
+            return {'CANCELLED'}
+        if (position - start).length <= 1e-6:
+            self.report({'WARNING'}, 'Move the 3D Cursor away from the start point')
+            return {'CANCELLED'}
+        if source.mode != 'OBJECT':
+            self.report({'WARNING'}, 'Return the source mesh to Object Mode before creating the curve')
+            return {'CANCELLED'}
+
+        data = bpy.data.curves.new(source.name + '_RebarPath', 'CURVE')
+        data.dimensions = '3D'
+        points = data.splines.new('BEZIER').bezier_points
+        points.add(1)
+        points[0].co = (0, 0, 0)
+        points[1].co = position - start
+        for point in points:
+            point.handle_left_type = point.handle_right_type = 'AUTO'
+        curve = bpy.data.objects.new(data.name, data)
+        curve.parent = source
+        curve.matrix_parent_inverse = source.matrix_world.inverted_safe()
+        curve.location = start
+        curve.hide_render = True
+        curve['project_damage_paint_source'] = source
+        serial = state.get(boolean_stack.INSTANCE, 0)
+        if serial:
+            curve[boolean_stack.INSTANCE] = serial
+        try:
+            output_collections.link_object(context, source, curve)
+        except RuntimeError as exc:
+            bpy.data.objects.remove(curve, do_unlink=True)
+            bpy.data.curves.remove(data)
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+
+        previous_curve = source.project_damage.rebar_drawing
+        was_applying = live._APPLYING
+        live._APPLYING = True
+        try:
+            source.project_damage.rebar_drawing = curve
+            boolean_stack.save(source)
+        finally:
+            live._APPLYING = was_applying
+        _clear_start(source, state)
+        if previous_curve is not None:
+            paint.delete_unshared_drawing(source, previous_curve)
+        live.invalidate_index()
+        background_compute.cancel(source)
+        _, reports = build.rebuild_object(context, source)
+        for level, message in reports:
+            self.report(level, message)
         return {'FINISHED'}
 
 

@@ -6,6 +6,7 @@ import bpy
 import numpy as np
 from . import live, params
 REBAR_STAMP="project_damage_rebar_of"
+DRAWN_REBAR_STAMP = 'project_damage_drawn_rebar_of'
 FIELDS = (('enable', 'bool', False, False), ('seed', 'int32_t', 0, False), ('layout', 'int32_t', 0, False), ('axis', 'int32_t', 0, False), ('side', 'int32_t', 0, False), ('angle', 'double', 0.0, False), ('cover', 'double', 3.0, True), ('spacing_u', 'double', 15.0, True), ('spacing_v', 'double', 15.0, True), ('bars_u', 'bool', True, False), ('bars_v', 'bool', True, False), ('outer', 'int32_t', 0, False), ('amount', 'double', 1.0, False), ('jitter', 'double', 0.08, False), ('tie_spacing', 'double', 20.0, True), ('tie_radius', 'double', 0.4, True), ('spiral', 'bool', False, False), ('type', 'int32_t', 0, False), ('radius', 'double', 0.6, True), ('scale', 'double', 1.0, False), ('rib_height', 'double', 0.12, False), ('rib_pitch', 'double', 0.65, False), ('twist_pitch', 'double', 10.0, False), ('sides', 'int32_t', 12, False), ('detail', 'double', 1.0, False), ('embed', 'double', 6.0, True), ('min_exposed', 'double', 1.0, False), ('wobble', 'double', 0.15, False), ('bow', 'double', 0.3, False), ('bend', 'double', 0.5, False), ('broken', 'double', 0.3, False), ('trim', 'double', 0.35, False), ('neck', 'double', 0.5, False), ('drop_loose', 'bool', True, False), ('mode', 'int32_t', 0, False), ('fit', 'int32_t', 0, False), ('deform', 'double', 0.0, False), ('reach', 'double', 0.0, True), ('core', 'bool', False, False), ('show_all', 'bool', False, False), ('stroke_radius', 'double', 1.0, False), ('stroke_embed', 'double', 1.0, False))
 FIELDS += (('material', 'int32_t', 0, False), ('brick_length', 'double', 25.0, True), ('brick_height', 'double', 6.5, True), ('brick_depth', 'double', 12.0, True), ('mortar', 'double', 1.0, True), ('missing', 'double', 0.3, False), ('brick_broken', 'double', 0.3, False), ('chamfer', 'double', 0.12, False), ('brick_jitter', 'double', 0.15, False), ('plank_width', 'double', 12.0, True), ('plank_thickness', 'double', 2.5, True), ('plank_gap', 'double', 0.6, True), ('plank_dir', 'int32_t', 0, False), ('splinter', 'double', 0.6, False))
 REBAR_FILL_ITEMS=(('0','Rebar','Steel reinforcement'),('1','Bricks','One connected brick layer held by the remaining solid'),('2','Wood Planks','Boards with splintered broken ends'))
@@ -83,10 +84,11 @@ def _apply_rebar_preset(self, context):
         if self.rebar_fill in {'2','5'} and 'cover' in values:self.boolean_wood_deepness=values['cover']
     live.touch_prop(self, context)
 
-def rebar_of(source):
+def rebar_of(source, instance=0):
+    from .wall_stack import INSTANCE
     uid = source.get("project_damage_uid")
     return next((o for o in bpy.data.objects if uid is not None
-                 and o.type == 'MESH' and o.get(REBAR_STAMP) == uid), None)
+                 and o.type == 'MESH' and o.get(REBAR_STAMP) == uid and o.get(INSTANCE, 0) == instance), None)
 
 def _rebar_material(kind='0'):
     if kind=='5':kind='2'
@@ -127,7 +129,7 @@ def _rebar_material(kind='0'):
     nt.links.new(mix.outputs[2], bsdf.inputs["Base Color"])
     return mat
 
-def _rebar_mesh(name, points, polys, bar, exposure, kind='0', part=None):
+def _rebar_mesh(name, points, polys, bar, exposure, kind='0', part=None, *, material=None):
     """Fast mesh build for the (N,3)/(M,4) arrays; d == c marks a triangle."""
     tri = polys[:, 2] == polys[:, 3]
     sizes = np.where(tri, 3, 4).astype(np.int32)
@@ -156,7 +158,7 @@ def _rebar_mesh(name, points, polys, bar, exposure, kind='0', part=None):
     e.data.foreach_set("value", exposure.astype(np.float32))
     if kind in {'3','4'}:
         return mesh
-    mesh.materials.append(_rebar_material(kind))
+    mesh.materials.append(material if material is not None else _rebar_material(kind))
     if kind=='1' and part is not None and len(part)==len(polys):
         values=np.asarray(part,dtype=np.int32)
         attr=mesh.attributes.new('rebar_part','INT','FACE')
@@ -170,23 +172,109 @@ def _mortar_material():
     from .material_defaults import get
     return get('mortar')
 
-def _place_rebar(context, source, out, factor):
-    """Own one optional rebar object per source; refresh or remove it safely.
-    Call next to _place_deposits in rebuild_object:
-        rebar = _place_rebar(context, obj, out, factor)
-        if rebar is not None:
-            reports.append(({'INFO'}, "ProjectDamage: %d rebar pieces" % out["rebar_bars"]))"""
+def drawn_curve(props):
+    if (not props.rebar_enable or not props.ui_boolean_enable or props.all_off
+            or props.rebar_fill != '0' or props.boolean_central_rebar):
+        return None
+    drawing = props.rebar_drawing
+    return drawing if drawing is not None and drawing.type == 'CURVE' else None
+
+
+def _drawn_material():
+    name = 'Hand-Drawn Rebar | Project Damage'
+    material = bpy.data.materials.get(name)
+    if material is None:
+        material = _rebar_material().copy()
+        material.name = name
+    return material
+
+
+def _remove_rebar(obj):
+    if obj is not None:
+        mesh = obj.data
+        bpy.data.objects.remove(obj, do_unlink=True)
+        if not mesh.users:
+            bpy.data.meshes.remove(mesh)
+
+
+def place_drawn_steps(context, source, core, factor, props, instance, reports):
+    """Sweep a separate steel profile along each authored spline, in source space."""
+    from . import background_compute as bg, paint, preview_quality, structure_rebuild, wall_stack
+    existing = next(wall_stack.output_objects(source, DRAWN_REBAR_STAMP, instance), None)
+    drawing = drawn_curve(props) if props is not None else None
+    if drawing is None:
+        _remove_rebar(existing)
+        return None
+
+    profile = core.BreakRebarParams()
+    params.fill_break_rebar(props, core, profile, params._clamp_scale(props.global_scale / 100),
+                           params._clamp_scale(preview_quality.percent(props) / 100))
+    profile.radius *= max(.01, min(100.0, profile.scale)) * max(.05, profile.stroke_radius)
+    profile.wobble = 0.0
+    points, faces, ids = [], [], []
+    offset = 0
+    try:
+        for index, path in enumerate(paint.read_paths(context, source, drawing, min_points=2)):
+            segments = np.linalg.norm(np.diff(path, axis=0), axis=1)
+            path = path[np.r_[True, segments > 1e-10]]
+            if len(path) < 2:
+                continue
+            normals, _ = structure_rebuild.frames(path, (0.0, 0.0, 1.0))
+            mesh = yield from bg.native(core, 'build_rebar_surface_path', profile,
+                                         (path * factor).ravel().tolist(), normals.ravel().tolist(),
+                                         False, False, custom_path=True)
+            if not len(mesh['polys']):
+                continue
+            points.append(mesh['points'] / factor)
+            faces.append(mesh['polys'] + offset)
+            ids.append(np.full(len(mesh['polys']), index, dtype=np.int32))
+            offset += len(mesh['points'])
+    except (ValueError, RuntimeError, TypeError) as exc:
+        reports.append(({'ERROR'}, f'Hand-Drawn Rebar: {exc}'))
+        return existing
+
+    if not faces:
+        _remove_rebar(existing)
+        return None
+    from . import boolean_stack
+    suffix = f' #{instance - boolean_stack.OUTPUT_OFFSET}' if instance else ''
+    name = source.name + '_project_damage_hand_drawn_rebar' + suffix
+    material = props.rebar_drawn_material or _drawn_material()
+    mesh = _rebar_mesh(name, np.concatenate(points), np.concatenate(faces), np.concatenate(ids),
+                       np.ones(offset, dtype=np.float32), material=material)
+    if existing is None:
+        existing = bpy.data.objects.new(name, mesh)
+    else:
+        previous = existing.data
+        existing.data = mesh
+        if not previous.users:
+            bpy.data.meshes.remove(previous)
+    existing.name = name
+    existing[DRAWN_REBAR_STAMP] = source['project_damage_uid']
+    if instance:
+        existing[wall_stack.INSTANCE] = instance
+    existing.project_damage_og_object = source
+    output_collections.link_object(context, source, existing)
+    existing.matrix_world = source.matrix_world
+    return existing
+
+
+def _place_rebar(context, source, out, factor, *, props=None, instance=0):
+    """Replace the result of one fill without touching other fill instances."""
+    from . import boolean_stack
+    from .wall_stack import INSTANCE
+    p = source.project_damage if props is None else props
     uid = source.get("project_damage_uid")
-    existing = rebar_of(source)
+    existing = rebar_of(source, instance)
     polys = out.get("rebar_polys")
     frames = out.get('rebar_brick_frame')
-    if (source.project_damage.rebar_fill == '1' and source.project_damage.rebar_brick_3d
+    if (p.rebar_fill == '1' and p.rebar_brick_3d
             and frames is not None and len(frames)):
         from . import brick3d
         placed = dict(out)
         placed['rebar_brick_frame'] = np.asarray(frames).copy() / factor
         temporary = brick3d.place_bricks(placed, source,
-            model_collection=source.project_damage.rebar_brick_collection,
+            model_collection=p.rebar_brick_collection,
             collection=output_collections.destination(context,source))
         if existing is None:
             existing = temporary
@@ -197,11 +285,12 @@ def _place_rebar(context, source, out, factor):
             if old_mesh.users == 0:
                 bpy.data.meshes.remove(old_mesh)
         existing[REBAR_STAMP] = uid
+        if instance:existing[INSTANCE] = instance
         existing.project_damage_og_object = source
         output_collections.link_object(context,source,existing)
         existing.matrix_world = source.matrix_world
         from .material_defaults import get
-        material = source.project_damage.rebar_brick_material or get('brick')
+        material = p.rebar_brick_material or get('brick')
         if material is not None:
             for i in range(len(existing.data.materials)):
                 existing.data.materials[i] = material
@@ -209,20 +298,19 @@ def _place_rebar(context, source, out, factor):
                 existing.data.materials.append(material)
         return existing
     if polys is None or len(polys) == 0:
-        if existing is not None:
-            old_mesh = existing.data
-            bpy.data.objects.remove(existing, do_unlink=True)
-            if old_mesh.users == 0:
-                bpy.data.meshes.remove(old_mesh)
+        _remove_rebar(existing)
         return None
-    kind='0' if source.project_damage.hang_enable and not source.project_damage.rebar_enable else source.project_damage.rebar_fill
+    kind='0' if not instance and p.hang_enable and (not p.rebar_enable or boolean_stack.SERIAL in source) else p.rebar_fill
+    suffix = f' #{instance - boolean_stack.OUTPUT_OFFSET}' if instance else ''
+    role = {'0':'rebar','1':'boolean_bricks','2':'boolean_planks','3':'boolean_framing',
+            '4':'boolean_chips','5':'boolean_laths'}[kind]
     if kind=='5':kind='2'
-    name = source.name + {'0':'_project_damage_rebar','1':'_project_damage_boolean_bricks','2':'_project_damage_boolean_planks','3':'_project_damage_boolean_framing','4':'_project_damage_boolean_chips'}[kind]
+    name = source.name + '_project_damage_' + role + suffix
     mesh = _rebar_mesh(name, out["rebar_points"] / factor, polys, out["rebar_bar"], out["rebar_exposure"],kind,out.get('rebar_part'))
     if kind=='3':
-        _framing.finish_mesh(mesh, source, out.get('rebar_part'), out.get('rebar_grain'))
+        _framing.finish_mesh(mesh, source, out.get('rebar_part'), out.get('rebar_grain'), props=p)
     if kind=='4':
-        _chips.finish_mesh(mesh, source, out.get('rebar_grain'))
+        _chips.finish_mesh(mesh, source, out.get('rebar_grain'), props=p)
     if existing is None:
         existing = bpy.data.objects.new(name, mesh)
     else:
@@ -232,19 +320,20 @@ def _place_rebar(context, source, out, factor):
             bpy.data.meshes.remove(old_mesh)
     existing.name=name
     existing[REBAR_STAMP] = uid
+    if instance:existing[INSTANCE] = instance
     existing.project_damage_og_object = source
     output_collections.link_object(context,source,existing)
-    material = getattr(source.project_damage,{'0':'rebar_material','1':'rebar_brick_material','2':'rebar_plank_material','3':'rebar_framing_material','4':'rebar_chips_material'}[kind])
+    material = getattr(p,{'0':'rebar_material','1':'rebar_brick_material','2':'rebar_plank_material','3':'rebar_framing_material','4':'rebar_chips_material'}[kind])
     if material is not None and kind not in {'3','4'}:
         mesh.materials[0]=material
-    if source.project_damage.hang_enable and kind=='0':
+    if not instance and p.hang_enable and kind=='0':
         parts=np.asarray(out.get('rebar_part',()),dtype=np.int32)
         if len(parts)==len(mesh.polygons):
             a=mesh.attributes.get('rebar_part') or mesh.attributes.new('rebar_part','INT','FACE')
             a.data.foreach_set('value',parts)
             cables=parts==2
             if cables.any():
-                cable=source.project_damage.hang_cable_material
+                cable=p.hang_cable_material
                 if cable is None:
                     cable=bpy.data.materials.get('ProjectDamage_Cable_Rubber')
                     if cable is None:
@@ -256,8 +345,8 @@ def _place_rebar(context, source, out, factor):
                 mesh.materials.append(cable)
                 indices=np.zeros(len(mesh.polygons),dtype=np.int32);indices[cables]=len(mesh.materials)-1
                 mesh.polygons.foreach_set('material_index',indices)
-    if kind=='1' and len(mesh.materials)>1 and source.project_damage.rebar_mortar_material is not None:
-        mesh.materials[1]=source.project_damage.rebar_mortar_material
+    if kind=='1' and len(mesh.materials)>1 and p.rebar_mortar_material is not None:
+        mesh.materials[1]=p.rebar_mortar_material
     existing.matrix_world = source.matrix_world
     return existing
 
@@ -274,10 +363,11 @@ REBAR_FIT_ITEMS = (
                           "or a cage of bars and hoops that follows the body"),
 )
 
-def fill_strokes(context,source,core_params,factor):
+def fill_strokes(context,source,core_params,factor,*,props=None):
     from . import paint
-    p=source.project_damage
+    p=source.project_damage if props is None else props
     if not core_params.enable or (p.boolean_central_rebar and p.rebar_fill == '0'):return
+    if drawn_curve(p) is not None:return
     paths=paint.read_paths(context,source,p.rebar_drawing,min_points=2)
     if paths:
         points=np.ascontiguousarray(np.concatenate(paths),dtype=np.float64)*factor

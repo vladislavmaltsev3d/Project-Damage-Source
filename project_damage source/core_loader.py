@@ -54,44 +54,54 @@ import sys
 import bpy
 
 MODULE_NAME = "project_damage_core_py"
+# Loaded as a submodule of this add-on (never a top-level module, never via
+# sys.path): Blender's extension policy forbids both.
+QUALIFIED_NAME = __package__ + "." + MODULE_NAME
+
+
+def loaded():
+    """The native core if it is already loaded, else None."""
+    return sys.modules.get(QUALIFIED_NAME)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
-                                                                              
-                                                                         
-                                               
+
+
+
 _ABI_TAG = "cp%d%d" % sys.version_info[:2]
 
-                                                                          
-                                                                             
-                          
+
+
+
 _REPO_DEFAULT = os.path.abspath(os.path.join(
     _HERE, "..", "..", "cpp", "build", "core_standalone_%s" % _ABI_TAG, "Release"))
 
-                                                                               
-                                                                        
-                                                                    
+
+
+
 _DEV_CONFIG = os.path.join(_HERE, "project_damage_core_path.txt")
 
 
 _PLAT_TAG = "macos-arm64" if sys.platform == "darwin" else "win64"
 
-                                                                               
-                                                                              
-                                                                               
-                                                                                
-                                                     
+
+
+
+
+
 _BUNDLED = os.path.join(_HERE, "core", "%s-%s" % (_PLAT_TAG, _ABI_TAG))
 
 
 def addon_version():
-    """The addon's own version as "X.Y.Z", from bl_info - stamped by the
-    release; a dev checkout carries whatever bl_info holds."""
-    return "%d.%d.%d" % sys.modules[__package__].bl_info["version"]
+    """Read the version through Blender for both add-ons and extensions."""
+    import addon_utils
+
+    version = addon_utils.module_bl_info(sys.modules[__package__])["version"]
+    return ".".join(map(str, version))
 
 
 def core_loaded_version():
-    mod = sys.modules.get(MODULE_NAME)
+    mod = loaded()
     return getattr(mod, "__version__", None) if mod is not None else None
 
 
@@ -170,12 +180,6 @@ class ProjectDamagePreferences(bpy.types.AddonPreferences):
         update=_redraw_interface,
     )
 
-    auto_setup_rebar: bpy.props.BoolProperty(
-        name="Auto Setup", default=False,
-        description='Fit the selected Boolean inner layer to existing openings when adding a Boolean asset',
-        update=_redraw_interface,
-    )
-
     cache_intermediates: bpy.props.BoolProperty(
         name='Cache Intermediate Geometry', default=True,
         description='Keep exact session geometry and preparation results for reuse. Reduces repeated work at the cost of RAM. Off discards intermediate caches; output quality is unchanged',
@@ -228,9 +232,9 @@ class ProjectDamagePreferences(bpy.types.AddonPreferences):
         subtype='DIR_PATH',
         default="",
     )
-                                      
-                                                                         
-                                                                     
+
+
+
     manual_dir: bpy.props.StringProperty(
         name="Manual Directory",
         description=("Directory holding the built manual site (index.html). "
@@ -245,10 +249,6 @@ class ProjectDamagePreferences(bpy.types.AddonPreferences):
         layout.prop(self, 'default_view_mode')
         layout.prop(self, "editorial_mode", icon='HELP')
         layout.prop(self, "enable_hints", icon='QUESTION')
-        setup = layout.box()
-        setup.label(text='Boolean Break', icon='MOD_BOOLEAN')
-        setup.prop(self, 'auto_setup_rebar')
-        setup.label(text='Fit inner layers to existing openings.', icon='INFO')
         performance=layout.box()
         performance.label(text='Performance', icon='PREFERENCES')
         performance.prop(self,'save_all_mesh_states')
@@ -258,24 +258,26 @@ class ProjectDamagePreferences(bpy.types.AddonPreferences):
         performance.prop(self,'cache_intermediates')
         row=performance.row();row.enabled=self.cache_intermediates
         row.prop(self,'incremental_updates')
-                                                                           
-                                                                             
-                                                               
+
+
+
         box = layout.box()
         box.label(text="Experimental Geometry", icon='EXPERIMENTAL')
         box.prop(self, "fracture_surface_proxy")
-        loaded = sys.modules.get(MODULE_NAME)
-        if loaded is not None and not hasattr(loaded, 'surface_guide_field'):
+        loaded_core = loaded()
+        if loaded_core is not None and not hasattr(loaded_core, 'surface_guide_field'):
             box.label(text="Restart Blender to load the updated surface guide core", icon='INFO')
         from . import material_library
         material_library.draw_preferences(layout,self)
         from . import preset_pack
         preset_pack.draw_preferences(layout)
+        from . import package_install
+        package_install.draw_preferences(layout)
 
 
-                                                                      
-                                                     
-                                                       
+
+
+
 _ABI_PREFIXES = (
     "%s.%s-" % (MODULE_NAME, _ABI_TAG),
     "%s.cpython-%d%d-" % (MODULE_NAME, sys.version_info[0], sys.version_info[1]),
@@ -326,20 +328,20 @@ def _all_candidates():
         if prefs.core_dir:
             yield "the addon preference", bpy.path.abspath(prefs.core_dir)
     except (KeyError, AttributeError):
-                                                                             
-                                                                         
+
+
         pass
     env = os.environ.get("PROJECT_DAMAGE_CORE_PY_DIR")
     if env:
         yield "$PROJECT_DAMAGE_CORE_PY_DIR", os.path.abspath(env)
     yield "the repo build dir (relative to this file)", _REPO_DEFAULT
     if os.path.isfile(_DEV_CONFIG):
-                                                                                 
-                                                                              
+
+
         with open(_DEV_CONFIG, "r", encoding="utf-8-sig") as f:
             configured = f.read()
-                                                                           
-                                                                                 
+
+
         for line in configured.splitlines():
             line = line.strip()
             if line:
@@ -366,20 +368,33 @@ def load():
 
     Cached by sys.modules: a second call after a successful one is a lookup.
     """
-    mod = sys.modules.get(MODULE_NAME)
+    mod = sys.modules.get(QUALIFIED_NAME)
     if mod is not None:
         return mod
     path = core_dir()
-    if path not in sys.path:
-        sys.path.append(path)
     try:
-        return __import__(MODULE_NAME)
+        import importlib.machinery, importlib.util
+        suffixes = tuple(importlib.machinery.EXTENSION_SUFFIXES)
+        files = sorted(f for f in _abi_modules(path) if f.endswith(suffixes))
+        if not files:
+            raise ImportError("no %s module for this Python in %s" % (MODULE_NAME, path))
+        spec = importlib.util.spec_from_file_location(QUALIFIED_NAME, files[0])
+        if spec is None or spec.loader is None:
+            raise ImportError("cannot create an import spec for " + files[0])
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[QUALIFIED_NAME] = mod
+        try:
+            spec.loader.exec_module(mod)
+        except BaseException:
+            sys.modules.pop(QUALIFIED_NAME, None)
+            raise
+        return mod
     except ImportError as exc:
         tried = "; ".join("%s: %s" % (label, p) for label, p in _candidates())
-                                                                            
-                                                                            
-                                                                            
-                                                                        
+
+
+
+
         raise RuntimeError(
             "ProjectDamage: the geometry core is missing from this addon. Make sure you "
             "installed the zip for THIS system (ProjectDamage-Blender-<version>-%s.zip) "

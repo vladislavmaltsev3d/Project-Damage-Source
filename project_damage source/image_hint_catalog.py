@@ -77,8 +77,8 @@ HINTS['physics_workflow'] = (
 )
 
 HINTS['physics_drawing'] = (
- 'Knife Through / Knife Surface / Guidance',
- 'With the Physics tab open, choose a viewport knife and draw on the target. Knife Through cuts all affected depth layers. Knife Surface cuts only directly touched pieces. Guidance is a separate layer adding denser automatic seeds near the stroke. Knife strokes must make a valid crossing or join an existing cut. Return to Physics and press Fracture Fills or Fracture Selected Fragments to apply the drawing.',
+ 'Knife Through / Knife Surface / Guidance / Cut Plane',
+ 'With the Physics tab open, choose a viewport tool. Knife Through cuts all affected depth layers. Knife Surface cuts only directly touched pieces. Guidance adds denser automatic seeds near the stroke. Cut Plane uses an editable mesh that crosses the pieces. Press Fracture Fills or Fracture Selected Fragments to apply the cuts.',
  (('wb_physics_knife_through','Knife Through'),('wb_physics_knife_surface','Knife Surface'),('wb_physics_knife_guidance','Guidance')),
 )
 

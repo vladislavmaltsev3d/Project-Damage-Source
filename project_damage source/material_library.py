@@ -12,6 +12,7 @@ import math
 import time
 import bpy
 import bpy.utils.previews
+from . import extension_storage
 
 ROOT = Path(__file__).resolve().parent
 LIBRARY = ROOT / 'data/material library'
@@ -28,22 +29,47 @@ _browser_available = False
 
 
 
-CONFIG = ROOT / 'material_library_config.json'
+_CONFIG_NAME = 'material_library_config.json'
+CONFIG = ROOT / _CONFIG_NAME
 
 def preferences():
     addon=bpy.context.preferences.addons.get(__package__)
     return addon.preferences if addon is not None else None
 
 
+def _config_path():
+    return extension_storage.config_path(_CONFIG_NAME) if extension_storage.IS_EXTENSION else CONFIG
+
+
+def _read_config(path):
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        if isinstance(data, dict):
+            return data
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _folder(config):
+    folder = config.get('folder')
+    return Path(folder).expanduser().resolve() if config.get('enabled') and isinstance(folder, str) and folder else None
+
+
 def configured_root():
-    pref=preferences()
+    pref = preferences()
+    if extension_storage.IS_EXTENSION:
+        config = _read_config(_config_path())
+        if config is not None:
+            return _folder(config)
     if pref is not None and not pref.material_library_enabled:return None
     selected=pref.material_library_dir if pref is not None else ''
     if selected:return Path(bpy.path.abspath(selected)).expanduser().resolve()
-    try:
-        data=json.loads(CONFIG.read_text(encoding='utf-8'))
-        if data.get('enabled') and data.get('folder'):return Path(data['folder']).expanduser().resolve()
-    except (OSError,ValueError,TypeError):pass
+    paths = extension_storage.previous_paths(_CONFIG_NAME) if extension_storage.IS_EXTENSION else (CONFIG,)
+    for path in paths:
+        config = _read_config(path)
+        if config is not None:
+            return _folder(config)
     return None
 
 
@@ -72,11 +98,52 @@ def invalidate():
         for area in screen.areas:area.tag_redraw()
 
 
+WRONG_FOLDER = ('Wrong folder: no Project Damage material library found here. Select the extracted '
+                'ProjectDamage_CC0_Materials folder, the one that has material_library.json and the '
+                '"material library" folder inside it')
+_last_error = ''
+
+
+def find_library_root(folder, max_depth=4, max_dirs=4000):
+    """The folder that holds material_library.json: the selected folder itself,
+    a folder somewhere inside it (the user picked the download folder or the
+    archive's outer folder), or its parent (the user opened 'material library')."""
+    start = Path(bpy.path.abspath(folder)).expanduser().resolve()
+    if start.is_file():
+        start = start.parent
+    def ok(p):
+        return (p / 'material_library.json').is_file() and (p / 'material library').is_dir()
+    for candidate in (start, start / 'data', start.parent, start.parent / 'data'):
+        if ok(candidate):
+            return candidate
+    # breadth-first search below the selected folder, shallow folders first
+    queue = [(start, 0)]; seen = 0
+    while queue:
+        here, depth = queue.pop(0)
+        if depth >= max_depth:
+            continue
+        try:
+            children = sorted(p for p in here.iterdir() if p.is_dir() and not p.name.startswith('.'))
+        except OSError:
+            continue
+        for child in children:
+            seen += 1
+            if seen > max_dirs:
+                return None
+            if ok(child):
+                return child
+            queue.append((child, depth + 1))
+    return None
+
+
 def validate_folder(folder):
-    root=Path(bpy.path.abspath(folder)).expanduser().resolve()
-    if not (root/'material_library.json').is_file() and (root/'data/material_library.json').is_file():root=root/'data'
+    if not folder:
+        raise ValueError(WRONG_FOLDER)
+    root = find_library_root(folder)
+    if root is None:
+        raise ValueError(WRONG_FOLDER)
     index=root/'material_library.json'
-    if not index.is_file():raise ValueError('Select the extracted ProjectDamage_CC0_Materials folder containing material_library.json')
+    if not index.is_file():raise ValueError(WRONG_FOLDER)
     data=json.loads(index.read_text(encoding='utf-8'));entries=data.get('entries',[])
     if not entries:raise ValueError('The material catalog is empty')
     for entry in entries:
@@ -85,9 +152,11 @@ def validate_folder(folder):
 
 
 def _write_config(folder,enabled):
-    tmp=CONFIG.with_suffix('.tmp')
+    path = _config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix('.tmp')
     tmp.write_text(json.dumps({'version':1,'folder':str(folder) if folder else '', 'enabled':enabled},indent=2),encoding='utf-8')
-    tmp.replace(CONFIG)
+    tmp.replace(path)
 
 
 # действие «Install Material Library»
@@ -101,6 +170,7 @@ class PROJECT_DAMAGE_OT_install_material_library(bpy.types.Operator):
         if not self.directory and pref is not None:self.directory=pref.material_library_dir
         context.window_manager.fileselect_add(self);return {'RUNNING_MODAL'}
     def execute(self,context):
+        global _last_error
         try:
             root,count=validate_folder(self.directory)
             pref=preferences()
@@ -108,8 +178,36 @@ class PROJECT_DAMAGE_OT_install_material_library(bpy.types.Operator):
             pref.material_library_dir=str(root);pref.material_library_enabled=True
             _write_config(root,True);invalidate()
         except (OSError,ValueError,TypeError,KeyError) as exc:
-            self.report({'ERROR'},str(exc));return {'CANCELLED'}
-        self.report({'INFO'},'Material library connected: %d materials'%count);return {'FINISHED'}
+            _last_error=str(exc)
+            self.report({'ERROR'},_last_error)
+            _show_wrong_folder(context,_last_error,self.directory)
+            return {'CANCELLED'}
+        _last_error=''
+        found=Path(bpy.path.abspath(self.directory)).expanduser().resolve()
+        where='' if found==root else ' (found in %s)'%root
+        self.report({'INFO'},'Material library connected: %d materials%s'%(count,where));return {'FINISHED'}
+
+
+def _show_wrong_folder(context,message,folder):
+    """A popup the user can't miss, next to the status-bar error."""
+    if bpy.app.background or context.window_manager is None:
+        return
+    def draw(self,_context):
+        col=self.layout.column(align=True)
+        if message.startswith('Wrong folder'):
+            col.label(text='This folder is not the Project Damage material library.',icon='ERROR')
+            col.label(text='Selected: '+str(folder))
+            col.separator()
+            col.label(text='Select the extracted ProjectDamage_CC0_Materials folder.')
+            col.label(text='Inside it you should see material_library.json')
+            col.label(text='and the folders "material library" and "material previews".')
+            col.label(text='A folder that contains this pack is fine too: it is found automatically.')
+        else:
+            col.label(text=message,icon='ERROR')
+    try:
+        context.window_manager.popup_menu(draw,title='Material Library: wrong folder',icon='ERROR')
+    except (RuntimeError,AttributeError):
+        pass
 
 
 class PROJECT_DAMAGE_OT_remove_material_library(bpy.types.Operator):
@@ -126,14 +224,17 @@ class PROJECT_DAMAGE_OT_remove_material_library(bpy.types.Operator):
 def draw_preferences(layout,pref):
     box=layout.box();box.label(text='CC0 Material Library (ambientCG / Poly Haven)',icon='MATERIAL')
     installed=available()
-    if not installed:
-        box.prop(pref,'material_library_dir',text='Material Library Folder')
     row=box.row(align=True);row.operator_context='INVOKE_DEFAULT'
     if installed:
         row.operator('project_damage.remove_material_library',text='Remove',icon='TRASH')
     else:
         row.operator('project_damage.install_material_library',text='Install / Connect',icon='FILE_FOLDER')
     box.label(text='Installed' if installed else 'Not installed — download and extract the separate CC0 material pack',icon='CHECKMARK' if installed else 'INFO')
+    if not installed and _last_error:
+        err=box.column(align=True);err.alert=True
+        err.label(text='Wrong folder selected last time.',icon='ERROR')
+        err.label(text='Select the folder that contains material_library.json,')
+        err.label(text='or any folder that has the extracted pack inside it.')
     box.label(text='Remove disconnects the folder and keeps your files.')
 
 
@@ -230,6 +331,7 @@ def target(operator):
 
 
 def append_material(entry):
+    from .material_defaults import restore_material
     if not available():raise ValueError('Install the separate CC0 material library in Project Damage Preferences')
     path = child_path(LIBRARY, entry['blend'])
     if not path.is_file():
@@ -239,7 +341,7 @@ def append_material(entry):
         if (material.get('project_damage_library_id') == entry['id']
                 and material.get('project_damage_library_file') == str(path)
                 and not material.get('project_damage_shader_uv')):
-            return material
+            return restore_material(material)
     with bpy.data.libraries.load(str(path), link=False) as (contents, loaded):
         if entry['name'] not in contents.materials:
             raise ValueError('Material not found in library: '+entry['name'])
@@ -262,7 +364,7 @@ def append_material(entry):
     repair(material.node_tree)
     material['project_damage_library_id'] = entry['id']
     material['project_damage_library_file'] = str(path)
-    return material
+    return restore_material(material)
 
 
 # строка материала и кнопка его выбора из библиотеки

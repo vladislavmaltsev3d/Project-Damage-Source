@@ -231,6 +231,101 @@ def transfer_maps(source, points, lt, lv, normals, base, edge_data=None):
 
     return vars(self)
 
+def repair_degenerate_uv(uv, points, loop_vertex, loop_total, loop_tri, source_tri, source_points, source_uv_tris):
+    """Give real UV area to generated faces whose transferred UVs collapsed.
+
+    The transfer projects every corner onto its source face and clamps it to
+    that face. Two kinds of new faces collapse to a line or a point in UV:
+    walls that stand on the surface (hole rims, crater sides) and faces that
+    lie past the border of their source face (bevels, chamfers).
+
+    Only those faces are rewritten. Each one continues the UV map of its
+    source triangle without clamping; the distance from the source plane is
+    unfolded sideways at the same texel density, so a wall receives a strip of
+    the texture that starts exactly at the rim. Faces that already have UV
+    area are returned untouched.
+    """
+    faces = len(loop_total)
+    if not faces or not len(uv):
+        return uv, 0
+    start = np.zeros(faces, np.int64)
+    np.cumsum(loop_total[:-1], out=start[1:])
+    loop_face = np.repeat(np.arange(faces), loop_total)
+    nxt = np.arange(len(loop_vertex)) + 1
+    last = start + loop_total - 1
+    nxt[last] = start
+    pos = points[loop_vertex]
+    cross3 = np.cross(pos, pos[nxt])
+    normal = np.zeros((faces, 3))
+    np.add.at(normal, loop_face, cross3)
+    area3 = np.linalg.norm(normal, axis=1) * .5
+    def uv_area(coords):
+        return np.bincount(loop_face, coords[:, 0] * coords[nxt, 1] - coords[nxt, 0] * coords[:, 1], faces) * .5
+    area_uv = uv_area(uv)
+    tri = loop_tri[start]
+    corners = source_tri[tri]
+    a = source_points[corners[:, 0]]
+    e1 = source_points[corners[:, 1]] - a
+    e2 = source_points[corners[:, 2]] - a
+    tri_uv = source_uv_tris[tri]
+    uv_a = tri_uv[:, 0]
+    du1 = tri_uv[:, 1] - uv_a
+    du2 = tri_uv[:, 2] - uv_a
+    source_normal = np.cross(e1, e2)
+    source_area = np.linalg.norm(source_normal, axis=1)
+    source_uv_area = du1[:, 0] * du2[:, 1] - du1[:, 1] * du2[:, 0]
+    usable = (source_area > 1e-20) & (np.abs(source_uv_area) > 1e-20)
+    density = np.zeros(faces)
+    density[usable] = np.abs(source_uv_area[usable]) / source_area[usable]
+    extent = float(np.ptp(points, axis=0).max()) if len(points) else 0.0
+    broken = usable & (area3 > (extent * 1e-7) ** 2) & (np.abs(area_uv) < area3 * density * 1e-3)
+    if not broken.any():
+        return uv, 0
+    rows = np.flatnonzero(broken)
+    loops = np.flatnonzero(broken[loop_face])
+    face = loop_face[loops]
+    a, e1, e2 = a[face], e1[face], e2[face]
+    unit = source_normal[face] / source_area[face][:, None]
+    offset = pos[loops] - a
+    # in-plane coordinates on the unclamped source triangle
+    g11 = np.einsum('ij,ij->i', e1, e1); g12 = np.einsum('ij,ij->i', e1, e2); g22 = np.einsum('ij,ij->i', e2, e2)
+    det = g11 * g22 - g12 * g12
+    det = np.where(np.abs(det) > 1e-30, det, 1.0)
+    def planar(vector):
+        d1 = np.einsum('ij,ij->i', vector, e1); d2 = np.einsum('ij,ij->i', vector, e2)
+        u = (g22 * d1 - g12 * d2) / det; v = (g11 * d2 - g12 * d1) / det
+        return u[:, None] * du1[face] + v[:, None] * du2[face]
+    # Hinge each face flat into its source plane (rotation that takes the face
+    # normal onto the source normal, about the corner nearest to that plane),
+    # then read the source UV map there. Lengths on the face are preserved, the
+    # texture is not mirrored and the rim corner keeps its surface UV.
+    face_normal = normal[face] / np.maximum(np.linalg.norm(normal[face], axis=1), 1e-30)[:, None]
+    height = np.abs(np.einsum('ij,ij->i', offset, unit))
+    order = np.lexsort((height, face))
+    first = np.ones(len(order), bool)
+    first[1:] = face[order][1:] != face[order][:-1]
+    pivot_loop = np.zeros(faces, np.int64)
+    pivot_loop[face[order][first]] = loops[order][first]
+    pivot = pos[pivot_loop[face]]
+    cosine = np.einsum('ij,ij->i', face_normal, unit)
+    axis = np.cross(face_normal, unit)
+    turn = cosine > -0.999
+    rel = pos[loops] - pivot
+    rotated = (rel * cosine[:, None] + np.cross(axis, rel)
+               + axis * (np.einsum('ij,ij->i', axis, rel) / np.maximum(1.0 + cosine, 1e-3))[:, None])
+    rel = np.where(turn[:, None], rotated, rel)
+    trial = uv.copy()
+    trial[loops] = uv_a[face] + planar(pivot + rel - a)
+    area = uv_area(trial)
+    fixed = broken & np.isfinite(area) & (np.abs(area) > area3 * density * 1e-3)
+    if not fixed.any():
+        return uv, 0
+    mask = fixed[loop_face]
+    result = uv.copy()
+    result[mask] = trial[mask]
+    return result, int(fixed.sum())
+
+
 class Transfer:
     def __init__(self, snap, mesh, out, factor):
         from . import background_compute as bg
@@ -273,6 +368,16 @@ class Transfer:
                 a=np.asarray(base_uv);flat=a[np.arange(a.shape[1])[None,:] < totals[:,None]]
                 good = np.isfinite(flat).all(axis=1)
                 uv[good] = flat[good]
+            try:
+                totals = np.empty(len(mesh.polygons), np.int32); mesh.polygons.foreach_get('loop_total', totals)
+                if len(uv) == int(totals.sum()) == len(self.loop_vertex):
+                    uv, _ = repair_degenerate_uv(np.asarray(uv, np.float64), self.points, self.loop_vertex, totals,
+                                                 self.loop_tri, self.source_tri, np.asarray(snap.points, np.float64),
+                                                 np.asarray(values, np.float64)[snap.transfer_tris])
+            except Exception:
+                # the repair is cosmetic: never let it stop a build
+                import traceback
+                traceback.print_exc()
             layer = mesh.uv_layers.get(name) or mesh.uv_layers.new(name=name)
             layer.uv.foreach_set('vector',np.asarray(uv,np.float32).ravel())
             layer.active_render = name == snap.uv_render

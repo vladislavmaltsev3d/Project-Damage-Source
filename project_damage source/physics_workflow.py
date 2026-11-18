@@ -44,7 +44,7 @@ def _settings_signature(context, source):
     from . import baked_materials, damage_physics as dp, inner_rough
 
     q = dp.quick(context)
-    values = (_settings_values(q, {'colliders'}),
+    values = (_settings_values(q, {'colliders', 'bake_start_frame', 'bake_end_frame'}),
               tuple((_settings_value(row.object), row.motion) for row in q.colliders))
     if source is not None and not baked_materials.is_applied(source):
         values += (_settings_values(dp.settings(source)),
@@ -383,13 +383,18 @@ class PROJECT_DAMAGE_OT_calculate_hit_releases(bpy.types.Operator):
 
 # действие «Quick Bake»
 class PROJECT_DAMAGE_OT_quick_bake(bpy.types.Operator):
-    """Bake all shards of this damage object to transform keyframes, through End Frame. Removes their rigid bodies; Undo restores the simulation"""
+    """Bake the active shards to transform keyframes from Bake Start through Bake End"""
     bl_idname='project_damage.quick_bake';bl_label='Quick Bake';bl_options={'REGISTER','UNDO'}
     @classmethod
     def poll(cls,context):return context.mode=='OBJECT' and any(o.rigid_body and o.rigid_body.type=='ACTIVE' for o in targets(context))
     def execute(self,context):
         from . import damage_physics as dp,live
         objects=[o for o in targets(context) if o.rigid_body and o.rigid_body.type=='ACTIVE'];q=dp.quick(context)
+        start, end = q.bake_start_frame, q.bake_end_frame
+        if end < start:
+            self.report({'ERROR'}, 'Bake End must be at or after Bake Start')
+            return {'CANCELLED'}
+        if not objects:return {'CANCELLED'}
         if rigid_cache_is_baked(context):
             self.report({'WARNING'}, 'Remove Baked Cache before baking shard keyframes')
             return {'CANCELLED'}
@@ -400,26 +405,30 @@ class PROJECT_DAMAGE_OT_quick_bake(bpy.types.Operator):
             for o in objects:o.hide_set(False);o.select_set(True)
             context.view_layer.objects.active=objects[0]
             world=context.scene.rigidbody_world
-            start=world.point_cache.frame_start if world else q.start_frame
-            end=max(start+1,q.end_frame)
+            scene=context.scene;original_frame=scene.frame_current
+            sim_start=min(world.point_cache.frame_start if world else q.start_frame, start)
+            scene.frame_end=max(scene.frame_end,end)
             if world:
                 cache = world.point_cache
                 cache.frame_end = max(cache.frame_end, end)
                 with context.temp_override(point_cache=cache):
                     if bpy.ops.ptcache.free_bake.poll():
                         bpy.ops.ptcache.free_bake()
+                cache.frame_start=sim_start
                 held = [obj for obj in objects if q.hold == 'HIT' and obj.get(dp.HOLD_STAMP)]
                 if held:
-                    dp.plan_hits(context, held, start, end, dp._hit_margin(context, q))
+                    dp.plan_hits(context, held, sim_start, end, dp._hit_margin(context, q))
                                                                            
                                                                            
                                                         
-            scene=context.scene;original_frame=scene.frame_current;samples=[]
+            samples=[]
             original_matrices={obj:obj.matrix_basis.copy() for obj in objects}
             original_bodies={obj:_body_snapshot(obj) for obj in objects}
-            for frame in range(start,end+1):
-                scene.frame_set(frame);dg=context.evaluated_depsgraph_get()
-                samples.append([obj.evaluated_get(dg).matrix_world.copy() for obj in objects])
+            for frame in range(sim_start,end+1):
+                scene.frame_set(frame)
+                if frame>=start:
+                    dg=context.evaluated_depsgraph_get()
+                    samples.append([obj.evaluated_get(dg).matrix_world.copy() for obj in objects])
             from . import cellf_output
             for obj in objects:
                 cellf_output.clear_activation(obj)
@@ -469,6 +478,26 @@ def _select(context,objects):
     for obj in context.selected_objects:obj.select_set(False)
     for obj in objects:obj.hide_set(False);obj.select_set(True)
     if objects:context.view_layer.objects.active=objects[0]
+
+
+class PROJECT_DAMAGE_OT_select_all_fractures(bpy.types.Operator):
+    """Select the visible, selectable fracture pieces that belong to the current Project Damage object"""
+    bl_idname='project_damage.select_all_fractures'
+    bl_label='Select All Fractures'
+    bl_options={'REGISTER','UNDO'}
+
+    @classmethod
+    def poll(cls,context):
+        return context.mode=='OBJECT' and settings_source(context) is not None
+
+    def execute(self,context):
+        pieces=[obj for obj in owned_piece_scope(context) if obj.name in context.view_layer.objects
+                and obj.visible_get(view_layer=context.view_layer) and not obj.hide_select]
+        if not pieces:
+            self.report({'INFO'}, 'No selectable fracture pieces for this object')
+            return {'CANCELLED'}
+        _select(context,pieces)
+        return {'FINISHED'}
 
 
 class PROJECT_DAMAGE_OT_quick_physics_menu(bpy.types.Operator):
@@ -526,7 +555,7 @@ class PROJECT_DAMAGE_OT_quick_physics_prepare(bpy.types.Operator):
 
 # действие «Fracture & Physics»
 class PROJECT_DAMAGE_OT_finish_physics_paint(bpy.types.Operator):
-    """Cut the prepared fills with all three drawing layers, then enable physics"""
+    """Fracture the prepared fills with the configured drawings and Cut Plane, then enable physics"""
     bl_idname='project_damage.finish_physics_paint';bl_label='Fracture & Physics';bl_options={'REGISTER','UNDO'}
     def execute(self,context):
         from . import damage_physics as dp,live,build,cellf_output
@@ -706,6 +735,8 @@ def draw_quick(layout,context):
     q=dp.quick(context);box=layout.box();box.use_property_split=False
     material_controls.centered_heading(box,'Quick Physics',icon='PHYSICS')
     row=box.row(align=True);row.scale_y=1.5
+    row.operator('project_damage.select_all_fractures',icon='RESTRICT_SELECT_OFF')
+    row=box.row(align=True);row.scale_y=1.5
     for value,label in (('CONCRETE','Concrete'),('WOOD','Wood'),('CUSTOM','Custom')):
         row.prop_enum(q,'material_preset',value,text=label)
     col=box.column(align=True);col.prop(q,'density');col.prop(q,'friction');col.prop(q,'bounce')
@@ -715,7 +746,8 @@ def draw_quick(layout,context):
         col.prop(q,'hit_margin')
         row=col.row(align=True);row.prop(q,'hit_area',text='Hit Area')
         row.operator('project_damage.hit_area_add',text='',icon='ADD')
-        col.operator('project_damage.calculate_hit_releases', icon='TIME')
+        row=col.row(align=True);row.scale_y=1.5
+        row.operator('project_damage.calculate_hit_releases', icon='TIME')
     col.prop(q,'shape')
     row = col.row(align=True)
     row.prop(q, 'wall_collider')
@@ -743,6 +775,9 @@ def draw_quick(layout,context):
     row=box.row(align=True)
     row.operator('project_damage.quick_bake',text='Quick Bake to End Frame',icon='ACTION')
     row.operator('project_damage.clear_physics_bake',text='',icon='TRASH')
+    row=box.row(align=True)
+    row.prop(q,'bake_start_frame')
+    row.prop(q,'bake_end_frame')
     source=ownership.context_source(context)
     if source and source.get('project_damage_quick_physics_painting'):
         box.operator('project_damage.finish_physics_paint',icon='CHECKMARK')
@@ -782,7 +817,7 @@ def remove_button(row,source,kind,module=''):
         op=row.operator('project_damage.remove_physics_output',text='',icon='TRASH');op.kind=kind;op.module=module
 
 
-CLASSES=(PROJECT_DAMAGE_OT_cellf_replace_original,PROJECT_DAMAGE_OT_static_pieces,PROJECT_DAMAGE_OT_clear_physics_bake,PROJECT_DAMAGE_OT_hit_area_add,PROJECT_DAMAGE_OT_remove_physics_output,PROJECT_DAMAGE_OT_collider_list,PROJECT_DAMAGE_OT_calculate_hit_releases,PROJECT_DAMAGE_OT_quick_bake,PROJECT_DAMAGE_OT_quick_physics_menu,
+CLASSES=(PROJECT_DAMAGE_OT_cellf_replace_original,PROJECT_DAMAGE_OT_static_pieces,PROJECT_DAMAGE_OT_clear_physics_bake,PROJECT_DAMAGE_OT_hit_area_add,PROJECT_DAMAGE_OT_remove_physics_output,PROJECT_DAMAGE_OT_collider_list,PROJECT_DAMAGE_OT_calculate_hit_releases,PROJECT_DAMAGE_OT_select_all_fractures,PROJECT_DAMAGE_OT_quick_bake,PROJECT_DAMAGE_OT_quick_physics_menu,
          PROJECT_DAMAGE_OT_quick_physics_prepare,PROJECT_DAMAGE_OT_finish_physics_paint)
 
 def stop():

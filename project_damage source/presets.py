@@ -42,13 +42,13 @@ from bl_operators.presets import AddPresetBase
 from . import presets_data
 from . import presets_library
 
-                                                                       
-                                
+
+
 presets_data.PRESETS.update(presets_library.props_table())
 for _retired_key in presets_library.UNAVAILABLE_PRESETS:presets_data.PRESETS.pop(_retired_key,None)
 
-                                                                           
-                                                                  
+
+
 FABRIC_NOISE_PROPS=('fabric_distribution_scale','fabric_distribution_strength','fabric_shape_noise_scale','fabric_shape_noise_strength','fabric_solid')
 PRESET_PROPS = sorted(presets_data.PRESETS["MILD"].keys())
 PRESET_PROPS += ["preserve_data", "fract_mode", "fract_asset", "surf_mode", "surf_close_strokes", "surf_paint_snap"]
@@ -154,7 +154,11 @@ def _remove_effect_stack(src):
             bpy.data.objects.remove(result, do_unlink=True)
     preset_breakers.clear(src)
     src.project_damage_effects.clear()
-    from . import fracture_stack
+    from . import fracture_stack, wall_stack
+    wall_stack.cleanup_outputs(src, set())
+    for key in (wall_stack.SERIAL, wall_stack.EDIT, wall_stack.BASE_MATERIALS, wall_stack.PROXIMITY_SNAPSHOTS):
+        if key in src:
+            del src[key]
     fracture_stack.reset(src)
     src.project_damage_effect_index = 0
 
@@ -238,16 +242,21 @@ class PROJECT_DAMAGE_OT_apply_preset(bpy.types.Operator):
         else:
             live.touch_prop(p,context)
         if self.preset in presets_library.LIBRARY and presets_library.LIBRARY[self.preset]['seeds']:
-                                                                                        
+
             try:presets_library.grow(src,context)
             except (RuntimeError,ValueError) as exc:self.report({'WARNING'},'Preset applied; grow it with Grow Ivy / Grow Roots ('+str(exc)+')')
+        # Ivy / Roots looks without a seed grew nothing and said nothing:
+        # ask for the start point (3D cursor + Enter) right away.
+        from . import recording_tools
+        missing=[k for k in ('ivy','roots') if recording_tools.needs_seed(src,k)]
+        if missing and not recording_tools.request_seed(context,src,missing):
+            self.report({'WARNING'},'Preset applied: place the 3D cursor where the %s should start and use Add Growth Seed'%' and '.join(missing))
         return {'FINISHED'}
 
 
 def userlib_directory(create=False):
-    directory=Path(__file__).resolve().parent/'User_lib'
-    if create:directory.mkdir(parents=True,exist_ok=True)
-    return directory
+    from . import extension_storage
+    return extension_storage.directory('User_lib', create=create)
 
 
 def user_preset_path(filename):
@@ -259,13 +268,17 @@ def user_preset_path(filename):
 
 
 class PROJECT_DAMAGE_MT_presets(bpy.types.Menu):
-    """Only user presets stored inside this add-on's User_lib directory."""
+    """Only user presets stored in Project Damage's User_lib directory."""
     bl_label = "ProjectDamage Presets"
     preset_subdir = "project_damage"
     preset_operator = "script.execute_preset"
     def draw(self,context):
-        directory=userlib_directory()
-        paths=sorted(directory.glob('*.py')) if directory.is_dir() else []
+        try:
+            directory=userlib_directory()
+            paths=sorted(directory.glob('*.py')) if directory.is_dir() else []
+        except OSError:
+            self.layout.label(text='Cannot open the User_lib directory', icon='ERROR')
+            return
         if not paths:self.layout.label(text='User_lib is empty',icon='INFO')
         for path in paths:
             if path.name.startswith('__'):continue
@@ -275,7 +288,7 @@ class PROJECT_DAMAGE_MT_presets(bpy.types.Menu):
 class PROJECT_DAMAGE_OT_open_userlib(bpy.types.Operator):
     bl_idname='project_damage.open_userlib'
     bl_label='Open User_lib Folder'
-    bl_description='Open only this add-on User_lib directory in Finder or Windows Explorer'
+    bl_description='Open the Project Damage User_lib directory in Finder or Windows Explorer'
 
     def execute(self,context):
         try:return bpy.ops.wm.path_open(filepath=str(userlib_directory(create=True)))
@@ -291,20 +304,35 @@ class PROJECT_DAMAGE_OT_load_user_preset(bpy.types.Operator):
     filename:bpy.props.StringProperty()
 
     def execute(self,context):
-        from . import live,sidebar
+        import sys
+        from . import fracture_stack, live, sidebar
         try:
             path=user_preset_path(self.filename)
             if not path.is_file():raise ValueError('Preset not found in User_lib')
         except (OSError,ValueError) as exc:
             self.report({'ERROR'},str(exc));return {'CANCELLED'}
         previous=live._APPLYING;live._APPLYING=True
-        try:status=bpy.ops.script.execute_preset(filepath=str(path),menu_idname='PROJECT_DAMAGE_MT_presets')
-        finally:live._APPLYING=previous
+        # Preset scripts from legacy installations use these module names.
+        modules = {
+            'project_damage': sys.modules[__package__],
+            'project_damage.ownership': ownership,
+            'project_damage.fracture_stack': fracture_stack,
+        }
+        old_modules = {name: sys.modules.get(name) for name in modules}
+        sys.modules.update(modules)
+        try:
+            status = bpy.ops.script.execute_preset(filepath=str(path), menu_idname='PROJECT_DAMAGE_MT_presets')
+        finally:
+            for name, module in old_modules.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+            live._APPLYING = previous
         if status=={'FINISHED'}:
             context.window_manager.project_damage_user_preset=path.name
             src=ownership.context_source(context)
             if src is not None:
-                from . import fracture_stack
                 if 'fracture_stack.load_preset' not in path.read_text(encoding='utf-8'):
                     fracture_stack.reset(src)
                 sidebar.sync(src);live.touch_prop(src.project_damage,context)
@@ -318,8 +346,8 @@ class PROJECT_DAMAGE_OT_add_preset(AddPresetBase, bpy.types.Operator):
     bl_label = "Save ProjectDamage Preset"
     preset_menu = "PROJECT_DAMAGE_MT_presets"
     preset_subdir = "project_damage"
-                                                                         
-                                                                  
+
+
     preset_defines = ["from project_damage.ownership import context_source", "project_damage = context_source(bpy.context).project_damage"]
 
     @classmethod
@@ -328,8 +356,8 @@ class PROJECT_DAMAGE_OT_add_preset(AddPresetBase, bpy.types.Operator):
 
     @property
     def preset_values(self):
-                                                                         
-                                                                             
+
+
         p=ownership.context_source(bpy.context).project_damage
         return ['project_damage.'+prop.identifier for prop in p.bl_rna.properties
                             if prop.identifier!='rna_type' and prop.identifier not in REMOVED_PRESET_VALUES and prop.type in {'BOOLEAN','INT','FLOAT','ENUM','STRING'}]
@@ -354,26 +382,42 @@ class PROJECT_DAMAGE_OT_add_preset(AddPresetBase, bpy.types.Operator):
             filename=self.as_filename(name)+'.py'
             path=user_preset_path(filename)
             if path.exists():raise ValueError('A preset with this name already exists in User_lib')
-            p=ownership.context_source(context).project_damage
+            source = ownership.context_source(context)
+            p = source.project_damage
             lines=['import bpy','from project_damage.ownership import context_source',
-                   'project_damage = context_source(bpy.context).project_damage']
+                   'source = context_source(bpy.context)',
+                   'project_damage = source.project_damage']
             for rna_path in self.preset_values:
                 value=getattr(p,rna_path.split('.',1)[1])
                 if not isinstance(value,(str,int,float,bool,set)):value=list(value)
                 lines.append(rna_path+' = '+repr(value))
-                                                                              
-            for key in ('weld','grass','gravel','foam','paper_generator','metal_gen','wood_gen','tile_gen','erosion_gen','crater_gen'):
-                settings=getattr(p.id_data,'project_damage_'+key)
-                lines.append('settings = context_source(bpy.context).project_damage_'+key)
+
+            for key in ('weld', 'grass', 'gravel', 'foam', 'paper', 'metal_gen', 'wood_gen',
+                        'tile_gen', 'erosion_gen', 'crater_gen'):
+                attr = 'project_damage_' + key
+                settings = getattr(source, attr, None)
+                if settings is None:
+                    continue
+                group_lines = []
                 if key.endswith('_gen'):
-                    lines.append("settings['_in_hierarchy'] = True")
-                    lines.append("settings['_resolution_reference'] = "+repr(settings.get('_resolution_reference',settings.resolution)))
+                    group_lines.append("settings['_in_hierarchy'] = True")
+                    reference = settings.get('_resolution_reference', settings.resolution)
+                    group_lines.append(f"settings['_resolution_reference'] = {reference!r}")
                 for prop in settings.bl_rna.properties:
-                    if prop.identifier!='rna_type' and prop.identifier not in REMOVED_PRESET_VALUES and prop.identifier not in {'resolution_quality','report'} and prop.type in {'BOOLEAN','INT','FLOAT','ENUM','STRING'}:
-                        lines.append('settings.'+prop.identifier+' = '+repr(getattr(settings,prop.identifier)))
+                    name = prop.identifier
+                    if prop.is_readonly or name in REMOVED_PRESET_VALUES or name in {'resolution_quality', 'report'}:
+                        continue
+                    if prop.type in {'BOOLEAN', 'INT', 'FLOAT', 'ENUM', 'STRING'}:
+                        value = getattr(settings, name)
+                        if getattr(prop, 'is_array', False):
+                            value = list(value)
+                        group_lines.append(f'settings.{name} = {value!r}')
+                if group_lines:
+                    lines.extend((f'settings = getattr(source, {attr!r}, None)', 'if settings is not None:'))
+                    lines.extend('    ' + line for line in group_lines)
             from . import fracture_stack
             lines.append('from project_damage import fracture_stack')
-            lines.append('fracture_stack.load_preset(context_source(bpy.context), '+repr(fracture_stack.preset_data(p.id_data))+')')
+            lines.append(f'fracture_stack.load_preset(source, {fracture_stack.preset_data(source)!r})')
             with path.open('x',encoding='utf-8') as file:file.write('\n'.join(lines)+'\n')
             context.window_manager.project_damage_user_preset=filename
             PROJECT_DAMAGE_MT_presets.bl_label=name
@@ -386,8 +430,7 @@ _CLASSES = (PROJECT_DAMAGE_OT_apply_preset, PROJECT_DAMAGE_MT_presets, PROJECT_D
             PROJECT_DAMAGE_OT_open_userlib,PROJECT_DAMAGE_OT_load_user_preset)
 
 _PRESET_PREVIEWS=None
-_PRESET_ITEMS=[]                                                        
-_PREVIEW_ROOT = Path(__file__).resolve().parent / 'previews' / 'presets'
+_PRESET_ITEMS=[]
 _CATALOG = None
 _CATEGORY_ITEMS = []
 _PREVIEW_FILES = {}
@@ -426,11 +469,12 @@ def _preview_files(entries):
 def _index_catalog():
     """List each folder once. Enum callbacks and GPU draws reuse this index."""
     global _CATALOG, _PREVIEW_FILES, _CATEGORY_ITEMS
-    from . import effect_categories
+    from . import effect_categories, preset_pack
+    preview_root = preset_pack.directory()
     catalog = {}
     images = {}
     assigned = set()
-    for entry in sorted(_directory_entries(_PREVIEW_ROOT), key=lambda e: e.name):
+    for entry in sorted(_directory_entries(preview_root), key=lambda e: e.name):
         if entry.name.startswith('.') or entry.name.casefold() in {'general','generals'}:
             continue
         try:
@@ -445,13 +489,12 @@ def _index_catalog():
     for group,title,_ in effect_categories.CATEGORIES:
         category=group.upper()
         if category in images:
-            catalog[category]=(title,_PREVIEW_ROOT,list(images[category]))
+            catalog[category]=(title,preview_root,list(images[category]))
 
 
-    from . import preset_pack
     favorites={key:version for files in images.values() for key,version in files.items() if key in preset_pack.favorites()}
     images['FAVORITES']=favorites
-    catalog={'FAVORITES':('Favorites',_PREVIEW_ROOT,list(favorites)),**catalog}
+    catalog={'FAVORITES':('Favorites',preview_root,list(favorites)),**catalog}
     if catalog == _CATALOG and images == _PREVIEW_FILES:
         return False
     for category in set(_PREVIEW_FILES) | set(images):
@@ -477,7 +520,7 @@ def _index_catalog():
 
 
 def _check_previews():
-                                                                                
+
     if time.monotonic() - _last_catalog_use >= _CATALOG_CHECK_INTERVAL:
         return None
     if _index_catalog():

@@ -188,7 +188,7 @@ def _stale_flush_timer():
     if live._busy():return .25
     try:
         stale_mesh_flush()
-    except Exception as exc:                                                    
+    except Exception as exc:
         print("ProjectDamage: stale mesh cleanup failed: %r" % exc)
     return None
 
@@ -229,7 +229,7 @@ def _place(context, obj, mesh, name):
                 _schedule_stale_flush()
             else:
                 bpy.data.meshes.remove(old)
-                mesh.name = name                                                            
+                mesh.name = name
     uid = obj.get("project_damage_uid")
     if uid is not None:
         res[RESULT_STAMP] = uid
@@ -239,15 +239,15 @@ def _place(context, obj, mesh, name):
     return res
 
 
-                                                                               
-                                                                                 
-                                                                          
-                                                                    
-                                                                          
-                                                                        
-                                                                                    
-                                                                          
-                           
+
+
+
+
+
+
+
+
+
 # Beyond this the fracture chain walk runs for minutes with no way to cancel.
 _CACHES = {}
 
@@ -292,20 +292,20 @@ def _get_cache(obj, core):
     return cache
 
 
-                                                                              
-                                                                                      
-                                                                                      
-                                                                             
-                                                                     
-                                                                            
-                                                                           
-                                                                     
-                         
+
+
+
+
+
+
+
+
+
 _DAMAGE_FIELDS = (
     "damage_shading", "damage_smooth_angle", "base_smooth_angle",
-                                                                             
-                                                                              
-                                                            
+
+
+
     "seed", "threshold_deg", "topology", "base_map", "axis_x", "axis_y", "axis_z",
     "amount", "size_min", "size_max", "depth_min", "depth_max",
     "detail", "stretch", "chip_rim_soft", "norm_enable", "norm_max_size",
@@ -342,32 +342,32 @@ _DAMAGE_FIELDS = (
     "coating_seed", "coating_satellites", "coating_stretch", "coating_dir_x", "coating_dir_y", "coating_dir_z", "coating_edge_wrap", "coating_facing_only", "coating_facing_x", "coating_facing_y", "coating_facing_z", "coating_facing_angle", "coating_flake_size", "coating_crack_length",
     "fract_detail",
     "fract_disp_strength", "fract_disp_scale", "fract_depth_mult", "fract_rim_soft",
-                                                                                
-                                                                             
-                                                                              
-                                                                                
-                                                                                
-                                                                                  
+
+
+
+
+
+
     "corner_prob", "corner_min_edges",
     "corner_size_min", "corner_size_max", "corner_depth_min", "corner_depth_max",
     "corner_detail", "corner_rim_soft",
     "corner_sec_amount", "corner_sec_size", "corner_sec_depth",
-                                                                            
-                                                                          
-                                                                           
-                                                                         
+
+
+
+
     "avoid_chips", "avoid_surf", "avoid_build", "avoid_fract", "avoid_corner",
 )
 _FRACT_LEVEL_FIELDS = ("amount", "width", "depth", "bias", "chips",
                        "chip_amount", "chip_size", "chip_depth", "subdiv", "length", "branches", "branch_length")
 
-                                                                           
-                                                                             
-                                                                     
-                                                                      
-                                                                            
-                                                                          
-                                                                      
+
+
+
+
+
+
+
 _BELOW_DAMAGE_FIELDS = ("fract_tile_offset", "fract_tile_seed")
 
 # The RESOLVED break params ComputeFingerprint hashes at project_damage_plugin.cpp
@@ -385,9 +385,9 @@ _BREAK_RESOLVED = ("break_surf_dmg",
 
 _FP_VERSION = b"project_damage-fp-v1"
 
-                                                                          
-                                                                            
-                                                                          
+
+
+
 _WORN_V2_FIELDS = (
     "chip_cluster", "chip_fine", "chip_profile", "chip_asym", "chip_guard",
     "corner_style", "corner_rough", "corner_tilt", "corner_flakes",
@@ -396,8 +396,8 @@ _WORN_V2_FIELDS = (
     "fract_rim_jag", "fract_flare",
     "build_shape", "build_lumps", "pile_height", "pile_lumps", "pile_detail", "deposit_detail",
 )
-                                                                           
-                               
+
+
 _SHARD_FIELDS = ("fract_shard_enable", "fract_shard_dir", "fract_shard_amount", "fract_shard_radius",
                  "fract_shard_falloff", "fract_shard_tilt", "fract_shard_random", "fract_shard_seed")
 
@@ -476,10 +476,10 @@ def fingerprints(obj, props, core, points, polys, params, factor, uvs=None,
     for level in (params.fract1, params.fract2, params.fract3):
         for name in _FRACT_LEVEL_FIELDS:
             _hash_value(h, getattr(level, name))
-                                                                            
-                                                                                                  
-                                                                            
-                                                                      
+
+
+
+
     _hash_value(h, len(points))
     _hash_value(h, len(polys))
     h.update(points.tobytes())
@@ -490,16 +490,16 @@ def fingerprints(obj, props, core, points, polys, params, factor, uvs=None,
     if have_uvs:
         _hash_value(h, len(uvs))
         h.update(uvs.tobytes())
-                                                                            
-                                                                      
-                                                                  
-                                                                       
+
+
+
+
     have_mask = mask_weights is not None
     _hash_value(h, have_mask)
     if have_mask:
-                                                                             
-                                                                           
-                              
+
+
+
         _hash_value(h, len(props.mask_group))
         _hash_value(h, props.mask_group)
         _hash_value(h, len(mask_weights))
@@ -521,24 +521,25 @@ def fingerprints(obj, props, core, points, polys, params, factor, uvs=None,
         _hash_value(h, props.avoid_attr)
         _hash_value(h, len(avoid_polys))
         h.update(avoid_polys.tobytes())
-                                                                           
-                                                                        
-                                                                   
-                                   
+
+
+
+
     guides = guide_splines or []
     _hash_value(h, len(guides))
     for poly in guides:
         _hash_value(h, len(poly))
         h.update(poly.tobytes())
-                                                                            
+
     have_rust = rust_weights is not None
     _hash_value(h, have_rust)
     if have_rust:
         _hash_value(h, props.rust_mask_source)
         _hash_value(h, len(rust_weights))
         h.update(np.ascontiguousarray(rust_weights, dtype=np.float64).tobytes())
-    from . import new_effects
+    from . import new_effects, through_holes
     new_effects.hash_inputs(h, params, effect_inputs or {})
+    through_holes.hash_inputs(h, params, _hash_value)
     from . import damaged_bevel
     damaged_bevel.hash_params(h, params)
     from . import concrete_pits
@@ -576,8 +577,8 @@ def fingerprints(obj, props, core, points, polys, params, factor, uvs=None,
             _hash_value(h, value)
     from . import asset_noise as _asset_noise
     _asset_noise.hash_props(h, props, params, _hash_value)
-                                                                              
-                                        
+
+
     fabric_block = getattr(params, "fabric", None)
     if fabric_block is not None and fabric_block.enable and hasattr(fabric_block, "tear_style"):
         _hash_value(h, "fabric-flat-surface-v3")
@@ -608,12 +609,12 @@ def fingerprints(obj, props, core, points, polys, params, factor, uvs=None,
         for name in dir(params):
             if name.startswith("coating_"):
                 _hash_value(h, getattr(params, name))
-                                                                          
-                                                                        
-                                                                     
-                                                                
-                                                                          
-                                      
+
+
+
+
+
+
     if params.fract_paint_only or params.surf_paint_only:
         _hash_value(h, "paint-v2-surface")
         for value in (params.fract_paint_only, params.surf_paint_only, params.surf_paint_snap):
@@ -678,18 +679,18 @@ def fingerprints(obj, props, core, points, polys, params, factor, uvs=None,
         from . import cell_cuts
         cell_cuts.hash_inputs(h,obj)
     _hash_value(h,bool(props.split_effect_zones))
-                                                                            
-                                                                          
+
+
     if props.perf_mesh_preparation or props.perf_ngon_restore:
         _hash_value(h, 'host-performance-v2-split')
         _hash_value(h, props.perf_mesh_preparation)
         _hash_value(h, props.perf_ngon_restore)
 
-                                                                          
-                                                                              
-                                                                             
-                                                                               
-                                             
+
+
+
+
+
     if params.fract_tile_offset > 0.0:
         for name in _BELOW_DAMAGE_FIELDS:
             _hash_value(h, getattr(params, name))
@@ -703,12 +704,12 @@ def fingerprints(obj, props, core, points, polys, params, factor, uvs=None,
             for value in (fp.x, fp.y, fp.z, fp.radius):
                 _hash_value(h, float(value))
 
-                                                                            
-                                                                             
-                                                                              
-                                                                               
-                                                                               
-                                                                  
+
+
+
+
+
+
     if params.base_map and obj is not None:
         mat_index = np.empty(len(obj.data.polygons), dtype=np.int32)
         obj.data.polygons.foreach_get("material_index", mat_index)
@@ -737,7 +738,7 @@ def fingerprints(obj, props, core, points, polys, params, factor, uvs=None,
         _hash_value(h, spec.noise_scale)
         _hash_value(h, spec.rim_amp)
         _hash_value(h, spec.rim_scale)
-        for v in spec.rel:                                                         
+        for v in spec.rel:
             _hash_value(h, v)
         _hash_value(h, spec.custom_hash)
         _hash_value(h, spec.custom_sheet)
@@ -892,12 +893,16 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
     if live._HISTORY_RESTORING:
         return None, [({'WARNING'}, 'Wait for Undo/Redo to finish before regenerating damage')]
     reports = []
-    from . import incremental, init_parenting
+    from . import boolean_stack, incremental, init_parenting, wall_stack, through_holes
+    wall_instances = wall_stack.SERIAL in obj and fill_modules is None
+    wall_layers = wall_stack.layers(obj) if wall_instances else []
+    boolean_instances = boolean_stack.SERIAL in obj and (fill_modules is None or 'boolean' in fill_modules)
+    boolean_layers = boolean_stack.layers(obj) if boolean_instances else []
     if not capture_solid and init_parenting.normalize_legacy(context,obj):
         reports.append(({'INFO'},'Normalized source scale while preserving its world-space geometry'))
     previous_result=result_of(obj)
     drawing_frames = live.drawing_frames(obj) if not capture_solid else None
-    if not capture_solid and previous_result is not None and previous_result.mode=='OBJECT' and incremental.body_unchanged(context,obj,previous_result):
+    if not boolean_instances and not capture_solid and previous_result is not None and previous_result.mode=='OBJECT' and incremental.body_unchanged(context,obj,previous_result):
         from . import generated_assets, ivy, paper_generator, roots
         generated_assets.after_build(context,obj,previous_result,reports)
         ivy.set_visibility(obj,obj.project_damage.ivy_enable and not obj.project_damage.all_off)
@@ -949,9 +954,9 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
             or not getattr(core, "brick_material_regions", False)
             or not getattr(core, "wallpaper_intact_material", False)):
         return None, [({'ERROR'}, "ProjectDamage: this addon needs the updated Materials core. Install the current ZIP and restart Blender.")]
-                                                                          
-                                                                     
-                                                                       
+
+
+
     preserve = bool(getattr(obj.project_damage, 'preserve_data', False))
     if not hasattr(core.Params(), 'fract_through'):
         return None, [({'ERROR'}, 'Fracture Through needs the updated core. Restart Blender after installing the update.')]
@@ -986,16 +991,16 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
     if obj.project_damage.draw_mask_enable and not getattr(core, 'draw_mask', False):
         return None, [({'ERROR'}, 'Draw Mask needs the updated core. Restart Blender after installing the update.')]
     if not getattr(core,'worn_v2',False):
-                                                                         
+
         reports.append(({'WARNING'},'Edge / Corner / Surface / Fracture / Bead / Corner Piles / Deposits: rebuild the core and restart Blender to get the new looks, Shard Displace and Corner Draw.'))
     if obj.project_damage.chips_mode=='PAINT' and not getattr(core,'edge_paint',False):
         return None,[({'ERROR'},'Edge Draw needs the updated core. Install the update and restart Blender.')]
     factor = unit_factor(context)
-                                                                          
-                                                                           
-                                                                         
-                                                                         
-                                                                         
+
+
+
+
+
     from . import input_prep
     try:
         prep_start = time.perf_counter()
@@ -1030,9 +1035,9 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
                                      "the damage is cut into the base mesh. Apply "
                                      "them first, or enable Mesh Preparation > Use Modifiers"))
 
-                                           
-                                                                           
-                                                                      
+
+
+
     if snap is None:
         uv_layer = obj.data.uv_layers.active if obj.project_damage.keep_uvs or preserve else None
         uvs_in = read_uvs(obj.data, uv_layer) if uv_layer is not None else None
@@ -1050,15 +1055,15 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
     else:
         mask_weights_in = prep.point_values(snap.groups[vg.index]) if vg is not None else None
 
-                                                                  
-                                                                              
+
+
     plaster_group=obj.vertex_groups.get(obj.project_damage.plaster_zone_group) if obj.project_damage.plaster_zone_group else None
     plaster_zone_weights=(None if plaster_group is None else
         read_mask_weights(obj.data,plaster_group.index) if snap is None else
         prep.point_values(snap.groups[plaster_group.index]))
 
-                                                                  
-                                                                 
+
+
     if snap is None:
         avoid_attr = (obj.data.attributes.get(obj.project_damage.avoid_attr)
                      if obj.project_damage.avoid_attr else None)
@@ -1066,22 +1071,22 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
             avoid_attr = None
         avoid_polys_in = read_avoid_polys(obj.data, avoid_attr) if avoid_attr is not None else None
     else:
-                                                                           
-                                                                           
+
+
         user_avoid = snap.face_bools.get(obj.project_damage.avoid_attr) if obj.project_damage.avoid_attr else None
         avoid_polys_in = (prep.avoid_polys(user_avoid)
                           if user_avoid is not None or prep.helper.any() else None)
 
-                                                                    
-                                                                            
-                                                                           
-                                                            
+
+
+
+
     guides_in = []
     if fill_modules is None and obj.project_damage.fract_mode == 'PROCEDURAL' and not obj.project_damage.all_off and (obj.project_damage.fract_enable or obj.project_damage.fract_through_enable):
         guides_in = read_guide_splines(context.evaluated_depsgraph_get(), obj,
                                        obj.project_damage.guides)
-                                                                          
-                                                                    
+
+
         guides_in = [g * factor for g in guides_in]
 
     from . import paint
@@ -1091,8 +1096,8 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
     if obj.project_damage.fract_mode == 'PAINT':
         guides_in = drawn
 
-    heat_weights_in = None                                                     
-    zone_weights_in = None                                                         
+    heat_weights_in = None
+    zone_weights_in = None
     from . import extra_effects
     try:
         if fill_modules is None:
@@ -1107,7 +1112,7 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
     except ValueError as exc:
         return None, [({'ERROR'}, "ProjectDamage: " + str(exc))]
     concrete_props = obj.project_damage
-    if ((concrete_props.concrete_enable or concrete_props.concrete_v2_enable)
+    if (not wall_instances and (concrete_props.concrete_enable or concrete_props.concrete_v2_enable)
             and concrete_props.concrete_mode == '1' and not concrete_strokes and not concrete_props.all_off):
         reports.append(({'WARNING'}, "Concrete Paint: no current-frame strokes; no concrete damage generated"))
 
@@ -1153,7 +1158,7 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
     if params.plaster.enable and plaster_zone_weights is not None and hasattr(params.plaster,'zone_weights'):
         params.plaster.zone_weights=plaster_zone_weights.tolist()
     from .impact_deform_tools import fill_protect_weights
-    fill_protect_weights(obj, params, snap, prep)                                   
+    fill_protect_weights(obj, params, snap, prep)
     if obj.project_damage.lath_riven_enable and not hasattr(params.lath, 'style'):
         reports.append(({'WARNING'}, 'Riven Lath: rebuild the native core and restart Blender; '
                          'until then it builds like Lath Damage'))
@@ -1169,7 +1174,7 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
             params.blast.empties = new_effects.fill_blast_empties(context, obj, core, factor)
     except ValueError as exc:
         return None, [({'ERROR'}, str(exc))]
-    if fill_modules is None or {'hang', 'boolean'}.intersection(fill_modules):
+    if not boolean_instances and (fill_modules is None or {'hang', 'boolean'}.intersection(fill_modules)):
         params.breakers = fill_breakers(obj, obj.project_damage, core, factor)
     if fill_modules is None:
         from . import concrete_pits, metal_tear, clay
@@ -1181,22 +1186,37 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
     if fill_modules is None or 'concrete' in fill_modules:
         from . import pipes, cables
         for service in (pipes, cables):
+            if wall_instances:
+                continue
             if fill_modules is None and service.wanted(obj.project_damage) and obj.get('project_damage_uid') is None:
                 _get_cache(obj,core)
             if fill_modules is None or service.damage_wanted(obj.project_damage):
                 concrete_strokes = service.before_core(context, obj, params, points, polys, factor, concrete_strokes, reports)
-    if fill_modules is None or ('boolean' in fill_modules and params.break_rebar.material in {3, 4}):
+    if boolean_instances:
+        try:
+            if not hasattr(params, 'boolean_layers'):
+                raise RuntimeError('Restart Blender to load the core with multiple Boolean fills')
+            boolean_stack.pack(context,obj,core,params,factor,boolean_layers)
+            if fill_modules is None:
+                from . import pipes, cables
+                for _, layer in boolean_layers:
+                    for service in (pipes, cables):
+                        if service.boolean_wanted(layer):
+                            service.before_core(context,obj,params,points,polys,factor,[],reports,props=layer)
+        except (ValueError,RuntimeError) as exc:
+            return None, reports + [({'ERROR'}, str(exc))]
+    elif fill_modules is None or ('boolean' in fill_modules and params.break_rebar.material in {3, 4}):
         from .rebar import fill_strokes
         try:fill_strokes(context,obj,params.break_rebar,factor)
         except (ValueError,RuntimeError) as exc:return None,[({'ERROR'},'Rebar drawing: '+str(exc))]
     if prep is not None:
-                                                                     
-                                                                        
+
+
         params.base_map = True
         if prep.path == "surface":
-                                                                             
-                                                                            
-                                                                          
+
+
+
             params.topology = 3
             for name in ("avoid_chips", "avoid_surf", "avoid_build", "avoid_fract", "avoid_corner"):
                 if hasattr(params, name):
@@ -1220,9 +1240,24 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
         fracture_stack.pack(context,obj,core,params,points,polys,factor,reports)
         if params.fracture_layers:
             guides_in=[];guide_levels=[]
+        if wall_instances:
+            if not hasattr(params, 'wall_layers'):
+                return None, reports + [({'ERROR'}, 'Restart Blender to load the core with multiple wall generators')]
+            effect_inputs.pop('lath_strokes', None)
+            concrete_strokes = []
+            _get_cache(obj, core)
+            try:
+                wall_stack.pack(context, obj, core, params, points, polys, factor, reports, wall_layers)
+            except ValueError as exc:
+                return None, reports + [({'ERROR'}, str(exc))]
     else:
         from . import fill_exact, background_compute
         fill_exact.filter_params(params, fill_modules, effect_inputs)
+    try:
+        through_holes.pack(context, obj, core, params, factor, wall_layers)
+    except (ValueError, np.linalg.LinAlgError) as exc:
+        return None, reports + [({'ERROR'}, str(exc))]
+    if fill_modules is not None:
         params.damage_shading = False
         try:
             out = yield from background_compute.native(
@@ -1258,8 +1293,8 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
         rust_paint_normals=rust_normals,**effect_inputs)
     cache = _get_cache(obj, core)
     t0 = time.perf_counter()
-                                                                              
-                                                                                  
+
+
     final_shading = params.damage_shading
     params.damage_shading = False
     params.profile_core = int(getattr(context.window_manager, 'project_damage_core_profiler', False))
@@ -1279,7 +1314,7 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
                               src_corner_normals=source_corner_normals, **effect_inputs)
     except background_compute.Deferred:
         return result_of(obj), reports + [({'INFO'}, 'ProjectDamage: calculation queued in background')]
-    except Exception as exc:                                                              
+    except Exception as exc:
         reports.append(({'ERROR'}, "ProjectDamage: the core refused this mesh: %s" % exc))
         return None, reports
     finally:
@@ -1287,12 +1322,12 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
     if capture_solid:
         return (out, prep, factor, points, polys), reports
     ms = (time.perf_counter() - t0) * 1000.0
-                                                                            
-                                                                                
+
+
     out.pop('corner_normals', None)
     if prep is not None and out.get("passthrough") and params.rust_enable:
-                                                                          
-                                                                          
+
+
         for key in ("rust", "rust_streak", "rust_source"):
             values = out.get(key)
             if values is not None and len(values) == len(prep.points):
@@ -1304,8 +1339,8 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
                         seen[source_index] = True
                 out[key] = restored
     if prep is not None:
-                                                                       
-                                             
+
+
         if len(out.get('debris_base_poly',())):
             # Native debris IDs refer to PREPARED polygons, not authored
             # n-gons. Never use them to index original material slots directly.
@@ -1338,8 +1373,8 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
             reports.append(({'INFO'}, "ProjectDamage: %d temporary surface faces removed"
                             % out["removed_helper_faces"]))
 
-                                                                           
-                                                                             
+
+
     if obj.project_damage.quad_remesh and not out.get("passthrough"):
         from .quad_remesh import quad_remesh, Settings as QuadSettings
         qs = QuadSettings()
@@ -1348,7 +1383,7 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
         try:
             remeshed, remesh_notes = quad_remesh(out, source_points=points, settings=qs)
         except Exception as exc:
-                                                                           
+
             remeshed = out
             remesh_notes = ['quad remesh skipped: %s' % exc]
         out = remeshed
@@ -1366,8 +1401,8 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
         try:
             remeshed, remesh_notes = smart_remesh(out, source_points=points, settings=rs)
         except Exception as exc:
-                                                                            
-                                                                   
+
+
             remeshed = out
             remesh_notes = ["smart remesh skipped: %s" % exc]
         out = remeshed
@@ -1382,16 +1417,19 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
     damage_materials = extra_effects.damage_materials(obj, params, damage_materials)
     from . import material_controls
     damage_materials = material_controls.overrides(obj, damage_materials)
+    if boolean_layers and damage_materials:
+        from .mesh_io import CLASS_NAMES
+        damage_materials.pop(CLASS_NAMES.index('break_P'), None)
     transfer = None
     transfer_snap = None
     if preserve:
         transfer_snap = snap if snap is not None else input_prep.read_source(context, obj, False)
     name = obj.name + "_project_damage"
     if out["passthrough"]:
-                                                                           
-                                                                         
-                                                                         
-                                                                          
+
+
+
+
         reason = passthrough_reason(obj, params, prep, polys, effect_inputs, out)
         if reason is not None:
             reports.append(reason)
@@ -1404,9 +1442,9 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
     else:
         res_mesh = _result_mesh(name, out["points"] / factor, out["polys"], None)
         tri_class = out["tri_class"]
-                                                                            
-                                                                           
-                                                                  
+
+
+
         base_poly = out.get("base_poly")
         shared_cracks = (obj.project_damage.fract_enable or obj.project_damage.fract_through_enable) and not obj.project_damage.all_off
         if (obj.project_damage.keep_selections or preserve) and base_poly is not None and len(base_poly):
@@ -1425,10 +1463,14 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
                                offset=offset, src_index=snap.material_index, damage_materials=damage_materials, shared_cracks=shared_cracks, skip_base_material=params.deform.enable)
         else:
             _apply_classes(res_mesh, tri_class, damage_materials=damage_materials, shared_cracks=shared_cracks, skip_base_material=params.deform.enable)
-                                                                    
-                                                                       
-                               
+
+
+
         fracture_stack.apply_materials(obj,res_mesh,out)
+        if wall_layers:
+            wall_stack.face_materials(res_mesh, out, wall_layers, wall_stack.default_materials())
+        if boolean_layers:
+            boolean_stack.face_materials(res_mesh, out, boolean_layers, bpy.data.materials.get('ProjectDamage_Break'))
         if not preserve and uvs_in is not None and out["uvs"] is not None and len(out["uvs"]):
             _write_result_uvs(res_mesh, uv_layer_name, out["uvs"],
                               out["points"], out["polys"], tri_class)
@@ -1449,7 +1491,7 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
         from . import result_transfer
         result_transfer.apply_wallpaper_materials(res_mesh, out, obj.project_damage)
     if tri_class is not None and (params.brick.enable or params.wall_hole.enable):
-                                                                             
+
         from . import result_transfer
         result_transfer.apply_brick_materials(res_mesh, out, obj.project_damage)
     if tri_class is not None:
@@ -1477,7 +1519,7 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
         props = obj.project_damage
         hanging_breakers = props.hang_enable and props.hang_mode == '1'
         shader_pin = props.ui_boolean_enable and props.break_shader_displacement
-        if (not props.all_off and (props.ui_boolean_enable or hanging_breakers)
+        if (not boolean_instances and not props.all_off and (props.ui_boolean_enable or hanging_breakers)
                 and (shader_pin or props.break_smooth_inside > 0)):
             from . import break_surface
             pin = (props.hang_shader_pin_distance if hanging_breakers and props.hang_shader_pin_enable and not shader_pin
@@ -1486,6 +1528,13 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
                 res_mesh, obj.matrix_world, factor, pin,
                 props.break_smooth_inside, write_mask=shader_pin,
                 rim_damage=props.break_rim_enable and props.break_rim_amount > 0)
+        for serial, layer in boolean_layers:
+            if layer.break_shader_displacement or layer.break_smooth_inside > 0:
+                from . import break_surface
+                yield from break_surface.finish_cut_surface_steps(
+                    res_mesh, obj.matrix_world, factor, layer.break_displacement_pin,
+                    layer.break_smooth_inside, write_mask=layer.break_shader_displacement,
+                    rim_damage=layer.break_rim_enable and layer.break_rim_amount > 0, owner=serial)
         if not props.all_off:
             from . import displacement_shader
             yield from displacement_shader.finish_effects(obj, res_mesh, factor, points, polys)
@@ -1542,8 +1591,8 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
             reports.append(({'WARNING'},'ProjectDamage: surface normal restore skipped: '+str(exc)))
     if len(out.get("rust", [])):
         _write_rust_attributes(res_mesh, out["rust"], out.get("rust_streak"))
-    elif len(out.get("rust_source", [])) == len(res_mesh.vertices):
-        _write_rust_attributes(res_mesh, out["rust_source"], out.get("rust_source_streak", "edge_wear", "scratch", "metal_dent", "metal_crease", "metal_contact"))
+    elif len(out.get("rust_source", [])) and len(out["rust_source"]) == len(res_mesh.vertices):
+        _write_rust_attributes(res_mesh, out["rust_source"], out.get("rust_source_streak"))
     from . import cell_cuts
     out=yield from cell_cuts.apply_steps(context,obj,out,factor)
     res = _place(context, obj, res_mesh, name)
@@ -1563,7 +1612,7 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
         _write_rust_attributes(coating.data, out["coating_rust"], out.get("coating_rust_streak"))
     if coating is not None:
         reports.append(({'INFO'}, "ProjectDamage: coating created (%d polygons)" % len(coating.data.polygons)))
-    from .rebar import _place_rebar
+    from .rebar import _place_rebar, place_drawn_steps
     from .lath_output import place_laths
     from .brick_output import place_bricks
     from .debris_output import place_debris
@@ -1582,11 +1631,37 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
         reports.append(({'WARNING'},'Cell Fracture: %d invalid cells were kept unchanged; other cuts completed'%obj['project_damage_cell_cut_invalid']))
     bricks=place_bricks(context,obj,out,factor)
     if bricks is not None:reports.append(({'INFO'},'ProjectDamage: %d separate bricks'%out['bricks_count']))
-    laths=place_laths(context,obj,out,factor)
+    laths=place_laths(context,obj,{} if wall_instances else out,factor)
     if laths is not None:reports.append(({'INFO'},'ProjectDamage: separate wooden laths created'))
     from . import concrete_rebar_output
-    concrete_rebar=concrete_rebar_output.place(context,obj,out,factor)
+    concrete_rebar=concrete_rebar_output.place(context,obj,{} if wall_instances else out,factor)
+    instances = []
+    if wall_instances:
+        wall_stack.cleanup_outputs(obj, {serial for serial, _, _ in wall_layers})
+        for serial, key, props in wall_layers:
+            if key in wall_stack.WOOD:
+                data = wall_stack.geometry_for(out, 'lath', serial)
+                extra = place_laths(context, obj, data, factor, props=props, instance=serial)
+            elif key in {'concrete', 'concrete_v2'}:
+                data = wall_stack.geometry_for(out, 'concrete_rebar', serial)
+                extra = concrete_rebar_output.place(context, obj, data, factor, props=props, instance=serial)
+            else:
+                continue
+            instances.append((extra, key))
     rb=_place_rebar(context,obj,out,factor)
+    drawn = yield from place_drawn_steps(context, obj, core, factor,
+                                         None if boolean_instances else obj.project_damage, 0, reports)
+    instances.append((drawn, 'boolean'))
+    if boolean_instances:
+        boolean_stack.cleanup_outputs(obj, boolean_layers)
+        fills = out.get('boolean_fills', {})
+        for serial, props in boolean_layers:
+            instance = boolean_stack.OUTPUT_OFFSET + serial
+            extra = _place_rebar(context, obj, fills.get(serial, {}), factor, props=props,
+                                 instance=instance)
+            instances.append((extra, 'boolean'))
+            drawn = yield from place_drawn_steps(context, obj, core, factor, props, instance, reports)
+            instances.append((drawn, 'boolean'))
     from . import wall_hole as _wall_hole
     wallhole_output = _wall_hole.after_build(context,obj,out,factor)
     if rb is not None:
@@ -1597,25 +1672,35 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
     deposits = _place_deposits(context, obj, out, factor)
     if deposits is not None:
         reports.append(({'INFO'}, "ProjectDamage: separate deposits created (%d polygons)" % len(deposits.data.polygons)))
+    # Bead and Corner Piles only grow in inner (concave) corners. On a convex
+    # mesh such as a plain cube they produced nothing and said nothing.
+    _p = obj.project_damage
+    if not _p.all_off:
+        if _p.build_enable and beads is None and _p.build_mode != 'PAINT':
+            reports.append(({'WARNING'}, "Bead: no inner edges found - a bead runs along concave edges "
+                            "(a wall meeting a floor, an inside corner); a convex mesh like a cube has none"))
+        if _p.pile_enable and piles is None:
+            reports.append(({'WARNING'}, "Corner Piles: no inner corners found - piles sit where two or more "
+                            "inner edges meet (the corner of a room, a box with an open top); try Bead for single inner edges"))
 
     if params.rust_enable and obj.project_damage.rust_materials:
         explicit = material_controls.explicit_materials(obj.project_damage)
         extra_effects.rust_materials(res, exclude=explicit)
         extra_effects.rust_materials(coating, exclude=explicit)
 
-                                                                       
-                                                                          
-                                                                        
-                                                    
-                                                                           
-                                                                          
-                                                                           
-                                                                     
-                                                                        
-                                                                     
-                                                                        
-                                                                           
-                                                      
+
+
+
+
+
+
+
+
+
+
+
+
+
     # Keep the modifier identity. Fabric passthrough uses an empty mask so
     # its Properties / Geometry Nodes UI does not change during a mode click.
     wn = res.modifiers.get("Weighted Normal")
@@ -1641,20 +1726,20 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
 
     n_pts, n_polys, n_chips = out["counts"]
 
-                                                                       
-                                                                          
-                                                                        
-                                                                         
-                                                                          
-                                                                         
-                                                                     
-                                                                      
-                                                                          
-                            
+
+
+
+
+
+
+
+
+
+
     extent = float((points.max(axis=0) - points.min(axis=0)).max())
-                                                                      
-                                                                        
-                                                            
+
+
+
     scale_hint = ("the mesh is %.3g cm across while chips are %.3g-%.3g cm "
                   "and craters %.3g-%.3g cm: resize the mesh (apply the "
                   "object's scale with Ctrl+A), or lower the Size and "
@@ -1662,7 +1747,7 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
                   % (extent, params.size_min, params.size_max,
                      params.surf_size_min, params.surf_size_max))
     if tri_class is None:
-        pass                                                            
+        pass
     elif n_polys == 0:
         reports.append(({'WARNING'},
                     "ProjectDamage: the damage removed the ENTIRE object - %s (%.0f ms)"
@@ -1705,7 +1790,7 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
     effect_groups.refresh(obj, res, ((coating, 'coating'), (bricks, 'brick'),
         (concrete_rebar, 'concrete_v2' if obj.project_damage.concrete_v2_enable else 'concrete'),
         (laths, 'lath_framing' if obj.project_damage.lath_framing_enable else 'lath_riven' if obj.project_damage.lath_riven_enable else 'lath_v2' if obj.project_damage.lath_v2_enable else 'lath'), (rb, 'hang' if params.hang.enable else 'boolean' if params.break_rebar.enable else 'concrete_v2' if obj.project_damage.concrete_v2_enable else 'concrete'),
-        (beads, 'buildup'), (piles, 'piles'), (deposits, 'deposits'), (debris, 'debris'), (rbf_pieces, 'rbf'), (cellf_pieces, 'cellf'), (wallhole_output,'wallhole')), damage_materials)
+        (beads, 'buildup'), (piles, 'piles'), (deposits, 'deposits'), (debris, 'debris'), (rbf_pieces, 'rbf'), (cellf_pieces, 'cellf'), (wallhole_output,'wallhole'), *instances), damage_materials)
     if fabric_source_normals is not None:
         try:
             restored,_faces=yield from base_normals.restore_steps(
@@ -1716,9 +1801,29 @@ def _rebuild_steps(context, obj, *, capture_solid=False, fill_modules=None):
             reports.append(({'WARNING'},'ProjectDamage: fabric normal restore skipped: '+str(exc)))
     from . import boolean_break, pipes, cables
     body_has_damage = tri_class is not None and np.any(tri_class != BASE_CLASS)
-    pipes.after_build(context, obj, res, reports, body_has_damage=body_has_damage)
-    cables.after_build(context, obj, res, reports, body_has_damage=body_has_damage)
-    boolean_break.after_build(context, obj, res, reports)
+    if boolean_instances:
+        base_for_tubes = boolean_stack.BaseTubes(obj.project_damage)
+        pipes.after_build(context, obj, res, reports, body_has_damage=body_has_damage, props=base_for_tubes, damage=not wall_instances)
+        cables.after_build(context, obj, res, reports, body_has_damage=body_has_damage, props=base_for_tubes, damage=not wall_instances)
+        for serial, props in boolean_layers:
+            local_body = out.get('boolean_bodies', {}).get(serial)
+            for service in (pipes, cables):
+                service.after_build(context, obj, res, reports, body_has_damage=body_has_damage and local_body is not None,
+                                    props=props, instance=boolean_stack.OUTPUT_OFFSET + serial, damage=False,
+                                    cut_body=local_body)
+    else:
+        pipes.after_build(context, obj, res, reports, body_has_damage=body_has_damage, damage=not wall_instances)
+        cables.after_build(context, obj, res, reports, body_has_damage=body_has_damage, damage=not wall_instances)
+    for serial, key, props in wall_layers:
+        service = {'pipes': pipes, 'cables': cables}.get(key)
+        if service is not None:
+            service.after_build(context, obj, res, reports, body_has_damage=body_has_damage,
+                                props=props, instance=serial)
+    if out['passthrough']:
+        if not obj.get(boolean_break.STAGE_KEY):
+            boolean_break.drop_fragments(obj)
+    else:
+        boolean_break.after_build(context, obj, res, reports, source_geometry=(points, polys))
     from . import generated_assets, paper_generator
     generated_assets.after_build(context,obj,res,reports)
     yield from paper_generator.after_build(context, obj, res, reports)
@@ -1957,8 +2062,8 @@ class PROJECT_DAMAGE_OT_update(bpy.types.Operator):
             area = context.area or next((a for a in window.screen.areas if a.type == 'VIEW_3D'), None)
             region = next((r for r in area.regions if r.type == 'WINDOW'), None) if area else None
             target_name = obj.name
-                                                                               
-                                                                               
+
+
             ui_scale = context.preferences.system.ui_scale
             window.cursor_warp(int(window.width / 2 - 215 * ui_scale),
                                int(window.height / 2 + 60 * ui_scale))
@@ -2057,8 +2162,8 @@ class PROJECT_DAMAGE_OT_update(bpy.types.Operator):
         try:released=ownership.release_loose_piece(context,obj)
         finally:live._APPLYING=previous
         if result_of(obj) is None:
-                                                                          
-                                                                            
+
+
             obj.project_damage['preserve_data'] = True
             obj.project_damage['keep_uvs'] = True
             obj.project_damage['keep_selections'] = True
@@ -2098,8 +2203,8 @@ def _existing_damage_materials(source):
     mesh = result.data
     indices = np.empty(len(mesh.polygons), dtype=np.int32)
     mesh.polygons.foreach_get("material_index", indices)
-                                                                           
-                                                         
+
+
     from .result_transfer import MATERIAL_REGIONS
     wallpaper = np.zeros(len(mesh.polygons), dtype=bool)
     for _, attr_name, _ in MATERIAL_REGIONS:
@@ -2147,8 +2252,8 @@ def _bake_damage_outputs(context, source, result):
     uid = source['project_damage_uid']
     outputs = [o for o in bpy.data.objects
                if any(o.get(stamp) == uid for stamp in ownership.STAMPS)]
-                                                                         
-                                                                             
+
+
     for obj in bpy.data.objects:
         if obj.type=='MESH' and any(obj.get(stamp) for stamp in ownership.LOOSE_STAMPS):
             if (any(obj.get(stamp)==uid for stamp in ownership.LOOSE_STAMPS)
@@ -2211,16 +2316,17 @@ def _bake_damage_outputs(context, source, result):
         obj.modifiers.remove(obj.modifiers[mod_name])
         if old.users == 0:
             bpy.data.meshes.remove(old)
-                                                                
+
     source.project_damage.live_update = False
     if ownership.pinned_source(context)==source:
         context.window_manager.project_damage_pinned_source=result
     live._dirty.pop(uid, None)
     live._BREAKER_SIG.pop(uid, None)
     _CACHES.pop(uid, None)
-    from . import mesh_finalization,baked_materials
+    from . import mesh_finalization,baked_materials,material_uv
     applied_batch=uuid.uuid4().hex
     for obj in outputs:
+        preserve_uv=material_uv.preserve_output_uv(obj)
         is_fragment=obj.type=='MESH' and any(obj.get(stamp) for stamp in baked_materials._FRAGMENT_STAMPS)
         if is_fragment:
             mask=baked_materials.inner_mask(obj)
@@ -2241,6 +2347,7 @@ def _bake_damage_outputs(context, source, result):
         for key in list(obj.keys()):
             if (key.startswith(('project_damage_', 'edgy_')) and key not in physics_keys) or key == 'pd_gen_source':
                 del obj[key]
+        if preserve_uv:obj[material_uv.PRESERVE_OUTPUT_UV]=True
         obj['project_damage_baked_backup'] = source
         obj['project_damage_applied'] = True
         obj['project_damage_baked_surface'] = obj == result

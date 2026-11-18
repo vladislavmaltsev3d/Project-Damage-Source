@@ -8,12 +8,22 @@ from pathlib import Path, PurePosixPath
 import bpy
 from bpy_extras.io_utils import ImportHelper
 
-ROOT=Path(__file__).resolve().parent/'previews/presets'
+from . import extension_storage
+
+_RELATIVE = 'previews/presets'
 _favorites=None
 
 
+def directory():
+    # An empty user directory records an explicit removal of a migrated pack.
+    try:
+        return extension_storage.directory(_RELATIVE)
+    except OSError:
+        return extension_storage.config_path(_RELATIVE) if extension_storage.IS_EXTENSION else extension_storage.PACKAGE_DIR / _RELATIVE
+
+
 def favorites_path():
-    return Path(bpy.utils.user_resource('CONFIG',path='project_damage',create=True))/'favorite_presets.json'
+    return extension_storage.config_path('favorite_presets.json')
 
 
 def favorites():
@@ -52,14 +62,24 @@ def install(path):
         entries=z.infolist()
         if len(entries)>10000 or sum(i.file_size for i in entries)>1024**3:
             raise ValueError('Preset pack is too large')
-        if len({i.filename for i in entries})!=len(entries):raise ValueError('Duplicate archive entries')
+        members = {}
         for info in entries:
             name=PurePosixPath(info.filename)
             if name.is_absolute() or '..' in name.parts or '\\' in info.filename or (info.external_attr>>16)&0o170000==0o120000:
                 raise ValueError('Invalid path in preset pack')
-        if 'manifest.json' not in z.namelist():raise ValueError('This is not a Project Damage preset pack')
-        if z.getinfo('manifest.json').file_size>16*1024**2:raise ValueError('Preset catalog is too large')
-        manifest=json.loads(z.read('manifest.json'))
+            if not name.parts or name.parts[0]=='__MACOSX':continue
+            key = name.as_posix().casefold()
+            if key in members:raise ValueError('Duplicate archive entries')
+            members[key] = info
+        manifests = [info for info in members.values() if not info.is_dir()
+                     and len(PurePosixPath(info.filename).parts) <= 2
+                     and PurePosixPath(info.filename).name == 'manifest.json']
+        if not manifests:raise ValueError('This is not a Project Damage preset pack')
+        if len(manifests)!=1:raise ValueError('The ZIP contains more than one preset manifest')
+        manifest_info=manifests[0]
+        manifest_root=PurePosixPath(manifest_info.filename).parent
+        if manifest_info.file_size>16*1024**2:raise ValueError('Preset catalog is too large')
+        manifest=json.loads(z.read(manifest_info))
         if not isinstance(manifest,dict):raise ValueError('Invalid preset catalog')
         if manifest.get('format')!='project-damage-presets' or manifest.get('version')!=1:
             raise ValueError('Unsupported preset pack format')
@@ -70,15 +90,18 @@ def install(path):
             if key not in presets.presets_data.PRESETS or key in presets_library.UNAVAILABLE_PRESETS:continue
             if not isinstance(record,dict):raise ValueError('Invalid preset entry')
             name=record.get('preview','');rel=PurePosixPath(name)
-            if len(rel.parts)!=3 or rel.parts[0]!='presets' or rel.suffix.lower()!='.png' or rel.stem.upper()!=key:
+            if ('\\' in name or '..' in rel.parts or len(rel.parts)!=3 or rel.parts[0]!='presets'
+                    or rel.suffix.lower()!='.png' or rel.stem.upper()!=key):
                 raise ValueError('Invalid preset preview: '+key)
-            if name not in z.namelist():raise ValueError('Missing preview: '+key)
-            if z.getinfo(name).file_size>32*1024**2:raise ValueError('Preset preview is too large')
-            images[name]=rel
+            info = members.get((manifest_root / rel).as_posix().casefold())
+            if info is None or info.is_dir():raise ValueError('Missing preview: '+key)
+            if info.file_size>32*1024**2:raise ValueError('Preset preview is too large')
+            images[info]=rel
         if not images:raise ValueError('No compatible presets. Update Project Damage first')
-        ROOT.parent.mkdir(parents=True,exist_ok=True)
-        stage=Path(tempfile.mkdtemp(prefix='.preset-install-',dir=ROOT.parent))
-        previous=ROOT.with_name('.presets-previous')
+        root = directory()
+        root.parent.mkdir(parents=True,exist_ok=True)
+        stage=Path(tempfile.mkdtemp(prefix='.preset-install-',dir=root.parent))
+        previous=root.with_name('.presets-previous')
         try:
             for name,rel in images.items():
                 data=z.read(name)
@@ -86,10 +109,10 @@ def install(path):
                 target=stage/Path(*rel.parts[1:]);target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(data)
             (stage/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2))
             if previous.exists():raise ValueError('A previous installation backup needs to be restored first')
-            if ROOT.exists():os.replace(ROOT,previous)
-            try:os.replace(stage,ROOT)
+            if root.exists():os.replace(root,previous)
+            try:os.replace(stage,root)
             except Exception:
-                if previous.exists():os.replace(previous,ROOT)
+                if previous.exists():os.replace(previous,root)
                 raise
             if previous.exists():shutil.rmtree(previous)
         finally:
@@ -101,10 +124,12 @@ def install(path):
 def remove():
     from . import presets,preset_browser
     # убираем только установленный набор, избранное и сцена остаются
-    if ROOT.is_symlink():raise ValueError('Preset folder is a symbolic link; remove the link manually')
+    root = directory()
+    if root.is_symlink():raise ValueError('Preset folder is a symbolic link; remove the link manually')
     preset_browser.close_browsers()
     try:
-        if ROOT.exists():shutil.rmtree(ROOT)
+        if root.exists():shutil.rmtree(root)
+        if extension_storage.IS_EXTENSION:root.mkdir(parents=True, exist_ok=True)
     finally:
         presets._CATALOG=None;presets._index_catalog()
 
@@ -112,7 +137,7 @@ def remove():
 class PROJECT_DAMAGE_OT_install_presets(bpy.types.Operator,ImportHelper):
     bl_idname='project_damage.install_builtin_presets'
     bl_label='Install Built-in Presets'
-    bl_description='Select the Project Damage preset ZIP; previews are installed inside the add-on folder'
+    bl_description='Select the Project Damage preset ZIP; previews are saved in the Project Damage library'
     filename_ext='.zip'
     filter_glob:bpy.props.StringProperty(default='*.zip',options={'HIDDEN'})
     def execute(self,context):
