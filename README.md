@@ -26,7 +26,7 @@ See [BUILDING.md](BUILDING.md). Use a CPython development installation matching 
 
 ## License and origins
 
-The Project Damage add-on and modified geometry sources are distributed under **GNU GPL version 3 or later**, as stated in their existing source headers. Third-party libraries retain their own licenses. This distribution includes a modified GPL geometry foundation credited to **Cornelius Dammrich**; its copyright and license notices are preserved. See [CREDITS.txt](CREDITS.txt) and [LICENSE](LICENSE).
+The Project Damage add-on and modified geometry sources are distributed under **GNU GPL version 3 or later**, as stated in their existing source headers. Third-party libraries retain their own licenses. See [CREDITS.txt](CREDITS.txt) and [LICENSE](LICENSE).
 
 This is a modified project, not an official upstream release or an endorsement by its upstream authors. No proprietary alternate license mentioned in original upstream headers is granted by this repository.
 
